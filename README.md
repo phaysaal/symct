@@ -23,14 +23,34 @@ cd ../bin/
 gdb -x <ALGORITHM>_<LIBRARY>_<PLATFORM>_gdb_script.gdb <ALGORITHM>_<LIBRARY>_<PLATFORM>
 ```
 
-## Tool Building
+
+
+## Binsec Plugin Install
+
+- Install OCaml
+- Install dune
+- Enter into `plugin` folder.
+```
+dune build @install
+dune install
+```
+
+
+## Testng Tool
+
+### Building
 
 - Download and install rust programming environment (especially cargo) in the standard procedure.
+```
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
 - Inside `driver` folder use --
 ```
 cargo build
-cargo install
+cargo build --release
+cargo install --path .
 ```
+
+
 - Read driver/README.md to see how to run an analysis.
-
-
