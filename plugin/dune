@@ -1,0 +1,14 @@
+; dune
+(library
+ (name bn)
+ (modules bn cryptoBN bnScript opensslbn bearsslbn)
+ (public_name bn.bn)
+ (flags (:standard -w -27)) ; if you need to silence some warnings
+ (libraries binsec.sse fmt) 
+)
+
+(plugin
+ (name bn)
+ (libraries bn.bn)
+ (site
+  (binsec plugins)))
