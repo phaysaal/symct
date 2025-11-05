@@ -1,6 +1,6 @@
 
 ```
-driver <LIBRARY> <ALGORITHM> <TEST-TYPE> <ROOT-PATH> [--tag <TAG> | --platform <PLATFORM> | --bn | --debug | --timeout <TIMEOUT> | --progressive <STUB-FILES> | --keylen 1024 ]*
+sct <LIBRARY> <ALGORITHM> <TEST-TYPE> <ROOT-PATH> [--tag <TAG> | --platform <PLATFORM> | --bn | --debug | --timeout <TIMEOUT> | --progressive <STUB-FILES> | --keylen 1024 ]*
 ```
 
 ## Rules:
@@ -24,16 +24,18 @@ driver <LIBRARY> <ALGORITHM> <TEST-TYPE> <ROOT-PATH> [--tag <TAG> | --platform <
 
 With all default configuration
 ```
-driver openssl rsa_decrypt rsa_full .. 
+sct openssl rsa_decrypt rsa_full .. 
 ```
 
 30 min analysis for 32-bit program
 ```
-driver openssl rsa_decrypt rsa_full .. --tag e_bin2bn --platform 32 --bn --debug --timeout 1800
+sct openssl rsa_decrypt rsa_full .. --tag e_bin2bn --platform 32 --bn --debug --timeout 1800
 ```
 
 For progressive analysis
 ```
-driver openssl rsa_decrypt rsa_full .. --tag e_bin2bn --platform 32 --bn --keylen 1024 --debug --timeout 300 --progressive BN_bin2bn.ini,BN_div.ini
+sct openssl rsa_decrypt rsa_full .. --tag e_bin2bn --platform 32 --bn --keylen 1024 --debug --timeout 300 --progressive BN_bin2bn.ini,BN_div.ini
 ```
 
+
+#### Note: If you do not wish to install `sct`, use `cargo run --` instead.
