@@ -36,7 +36,8 @@ module OpenSSLBN : CryptoBN = struct
     let rval = read_gen sz (!CryptoBN.key_size/8/(env.wordsize/8)) p (* Dba.Expr.unary (Dba.Unary_op.Uext key_size) p *) in
     let evar = lval2exp var in
     
-    let rval2 = (Dba.Expr.ite
+    
+	let rval2 = (Dba.Expr.ite
                    (Dba.Expr.equal
                       (Dba.Expr.load
                          word_size (* (Size.Byte.create 4) *)
@@ -45,17 +46,21 @@ module OpenSSLBN : CryptoBN = struct
                       )
                       (Dba.Expr.constant bv32_one))
                    (Dba.Expr.uminus evar)
-                   (evar)) in (* @[d+12,4] = 1 ? ~evar + 1 : evar *)
+                   (evar)) in
+                   (* (rval)) in (* @[d+12,4] = 1 ? ~evar + 1 : evar *) *)
     Stack.push evar bv_stack;
 
     (match var with
        Var var ->
-       let i = Ir.Assign {var; rval} in
-       let i2 = Ir.Assign {var; rval=rval2} in
-       (* let ip = Ir.Print (Output.Value (Output.Hex, evar)) in *)
-       Format.printf "i: %a\n" Ir.pp_fallthrough i;
-       Format.printf "i2: %a\n" Ir.pp_fallthrough i2;
-       [i; i2 (*; ip *)]
+       let i = Ir.Assign {var; rval} in 
+       let i2 = Ir.Assign {var; rval=rval2} in (* var := var OR var := -var *)
+       (* let ip = Ir.Print (Output.Value (Output.Hex, Dba.Expr.load
+                         word_size (* (Size.Byte.create 4) *)
+                         dir
+                         (Dba.Expr.binary Dba.Binary_op.Plus trval (Dba.Expr.constant (bvws (env.wordsize*3/8)))))) in *)
+       (* Format.printf "i: %a\n" Ir.pp_fallthrough i;
+       Format.printf "i2: %a\n" Ir.pp_fallthrough i2; *)
+       [i; i2 ]
      | _ -> failwith "Invalid Variable"
     )
 
@@ -101,11 +106,11 @@ module OpenSSLBN : CryptoBN = struct
 
     (* compute abs *)
     let var  = match bvx with Dba.Expr.Var v -> v | _ -> failwith "Invalid bvx" in
-    (* let e2  = Dba.Expr.load word_size dir addr in *)  (* unsigned *)
-    (* let cond = Dba.Expr.binary Dba.Binary_op.Eq e2 one in *)  (* unsigned *)
-    (* let truep = Dba.Expr.unary Dba.Unary_op.UMinus bvx in *)  (* unsigned *)
+    let e2  = Dba.Expr.load word_size dir addr in  (* unsigned *)
+    let cond = Dba.Expr.binary Dba.Binary_op.Eq e2 one in  (* unsigned *)
+    let truep = Dba.Expr.unary Dba.Unary_op.UMinus bvx in  (* unsigned *)
     let falsep = bvx in
-    let rval = falsep (* Dba.Expr.ite cond truep falsep *) in  (* unsigned *)
+    let rval = Dba.Expr.ite cond truep falsep in  (* unsigned *)
     (* let i3 = Ir.Assign {var; rval} in (* bv2bn_tmp1<1024> := @[bn_p+12,4] = 1 ? 0 - bv_x : bv_x *) *) (* unsigned *)
     let i3 = Ir.Assign {var; rval} in
 

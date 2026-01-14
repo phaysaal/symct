@@ -1,7 +1,9 @@
 #include <openssl/rsa.h>
+#include <openssl/ec.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/bn.h>
+#include <openssl/evp.h>
 
 static unsigned char *rsa_n, *rsa_e, *rsa_d, *rsa_p, *rsa_q, *rsa_dmp1, *rsa_dmq1, *rsa_iqmp;
 static unsigned int  len_n,  len_e, len_d, len_p, len_q, len_dmp1, len_dmq1, len_iqmp;
@@ -63,5 +65,43 @@ void encode_rsa(RSA *rsa) {
   RSA_set0_key(rsa, n, e, d);
   RSA_set0_factors(rsa, p, q);
   RSA_set0_crt_params(rsa, dmp1, dmq1, iqmp);
-  
+
+}
+
+// ECDSA key management
+static unsigned char *ec_private_key;
+static unsigned int len_ec_private_key;
+
+void decode_ec(EC_KEY *ec_key) {
+  const BIGNUM *priv_key = EC_KEY_get0_private_key(ec_key);
+
+  len_ec_private_key = BN_num_bytes(priv_key);
+  ec_private_key = malloc(len_ec_private_key);
+  BN_bn2bin(priv_key, ec_private_key);
+}
+
+void encode_ec(EC_KEY *ec_key) {
+  BIGNUM *priv_key = BN_bin2bn(ec_private_key, len_ec_private_key, NULL);
+  EC_KEY_set_private_key(ec_key, priv_key);
+  BN_free(priv_key);
+}
+
+// EdDSA key management
+static unsigned char *eddsa_private_key;
+static size_t len_eddsa_private_key;
+
+void decode_eddsa(EVP_PKEY *pkey) {
+    size_t len = 0;
+    if (EVP_PKEY_get_raw_private_key(pkey, NULL, &len) == 1) {
+        len_eddsa_private_key = len;
+        eddsa_private_key = malloc(len_eddsa_private_key);
+        EVP_PKEY_get_raw_private_key(pkey, eddsa_private_key, &len_eddsa_private_key);
+    }
+}
+
+void encode_eddsa(EVP_PKEY **pkey) {
+    if (*pkey) {
+        EVP_PKEY_free(*pkey);
+    }
+    *pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, eddsa_private_key, len_eddsa_private_key);
 }

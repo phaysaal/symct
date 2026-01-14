@@ -26,11 +26,11 @@ include Cli.Make (struct
   end)
 
 module Backend = Builder.Variant_choice_assoc (struct
-  type t = [ `Openssl | `Bearssl ]
+  type t = [ `Openssl | `Bearssl | `Wolfssl | `Mbedtls ]
   let name = "backend"
-  let doc  = "Big-number backend: openssl | bearssl"
+  let doc  = "Big-number backend: openssl | bearssl | wolfssl | mbedtls"
   let default   = `Bearssl
-  let assoc_map = [ "openssl", `Openssl; "bearssl", `Bearssl ]
+  let assoc_map = [ "openssl", `Openssl; "bearssl", `Bearssl; "wolfssl", `Wolfssl; "mbedtls", `Mbedtls ]
 end)
 
 module KeyLength = Builder.Integer (struct
@@ -47,6 +47,8 @@ let set_backend = function
     Format.printf "OpenSSL is chosen";
     backend_ref := (module Opensslbn.OpenSSLBN : CryptoBN.CryptoBN)
   | `Bearssl -> backend_ref := (module Bearsslbn.BearSSLBN  : CryptoBN.CryptoBN)
+  | `Wolfssl -> backend_ref := (module Wolfsslbn.WolfSSLBN  : CryptoBN.CryptoBN)
+  | `Mbedtls -> backend_ref := (module Mbedtlsbn.MbedTLSBN  : CryptoBN.CryptoBN)
 
 let set_keylen n =
   Format.printf "%d is chosen as key len" n;

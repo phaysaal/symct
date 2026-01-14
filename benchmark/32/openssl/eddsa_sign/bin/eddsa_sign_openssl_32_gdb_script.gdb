@@ -5,6 +5,6 @@ run
 printf "gs_base<32> := %#x\n", *($ebx + 4)
 continue
 continue
-generate-core-file ./rsa_decrypt_openssl_32.core
+generate-core-file ./eddsa_sign_openssl_32.core
 kill
 quit

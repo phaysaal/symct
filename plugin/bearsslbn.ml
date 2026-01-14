@@ -10,7 +10,7 @@ module Binary_op = Dba.Binary_op
 
 module BearSSLBN : CryptoBN.CryptoBN = struct
 
-  let words _wordsize = 2 (* (CryptoBN.key_size/8/(_wordsize/8)) *)
+  let words _wordsize = (!CryptoBN.key_size/8/(_wordsize/8))
     
   (*
      size = @[bnp,4]
@@ -27,7 +27,7 @@ module BearSSLBN : CryptoBN.CryptoBN = struct
 
     (* d is bnp+4,0x20
     *)
-    let d = Expr.load (Size.Byte.create (!CryptoBN.key_size/8)) dir d_addr (* @[bnp+4,0x20] *) in
+    let d = Expr.load (Size.Byte.create ((!CryptoBN.key_size/8) + (env.wordsize/8))) dir d_addr (* @[bnp+4,0x20] *) in
     (* Format.printf "d: %a\n" Dba_printer.Ascii.pp_bl_term d; *)
 
     let rec mk_br_31_data f i x =
@@ -57,8 +57,10 @@ module BearSSLBN : CryptoBN.CryptoBN = struct
     let szaddr = rval in (* bnp *)
     (* Format.printf "szaddr: %a\n" Dba_printer.Ascii.pp_bl_term szaddr; *)
     let sz' = Expr.load word_size dir szaddr (* @[rval,4] *) in (* @[bnp,4] *)
-    let sz = Expr.sub (Expr.shift_right (Expr.add (sz')
-                                  (Expr.constant (Bitvector.create (Z.of_int 63) (env.wordsize)))) (Expr.constant (Bitvector.create (Z.of_int 5) (env.wordsize)))) one in
+    (* let sz = Expr.sub (Expr.shift_right (Expr.add (sz')
+                                  (Expr.constant (Bitvector.create (Z.of_int 63) (env.wordsize)))) (Expr.constant (Bitvector.create (Z.of_int 5) (env.wordsize)))) one in *)
+let sz = Expr.shift_right (Expr.add (sz')
+                                  (Expr.constant (Bitvector.create (Z.of_int 31) (env.wordsize)))) (Expr.constant (Bitvector.create (Z.of_int 5) (env.wordsize))) in
     (* Format.printf "sz: %a\n" Dba_printer.Ascii.pp_bl_term sz; *)
     
     let rval = read_gen sz (words env.wordsize) (Expr.uext !CryptoBN.key_size p) in
@@ -70,9 +72,11 @@ module BearSSLBN : CryptoBN.CryptoBN = struct
        Var var ->
        let _i = Ir.Assign {var; rval} in
        let _ip = Ir.Print (Output.Value (Output.Hex, evar)) in
+let _ip2 = Ir.Print (Output.Value (Output.Hex, sz)) in
        Options.Logger.info "%a\n" Ir.pp_fallthrough _i;
        Options.Logger.info "%a\n" Ir.pp_fallthrough _ip;
-       [_i ; _ip]
+Options.Logger.info "%a\n" Ir.pp_fallthrough _ip2;
+       [_i ; _ip; _ip2]
      | _ -> failwith "Invalid Variable"
     )
   
