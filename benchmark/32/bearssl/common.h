@@ -1,57 +1,50 @@
-// common.h
+#ifndef BEARSSL_COMMON_H
+#define BEARSSL_COMMON_H
+
 #include <bearssl.h>
-#include <stdlib.h>
-#include <string.h>
+#include <stddef.h>
 
-// Global buffers for BearSSL key components
-static unsigned char *rsa_p, *rsa_q, *rsa_dp, *rsa_dq, *rsa_iq;
-static size_t len_p, len_q, len_dp, len_dq, len_iq;
+/* ============================================================
+ * Common BearSSL helpers for private key handling and utilities
+ * ============================================================
+ */
 
-void decode_rsa_bearssl(const br_rsa_private_key *key) {
-    // Store key components in separate buffers for secret injection pattern
-    
-    len_p = key->plen;
-    len_q = key->qlen;
-    len_dp = key->dplen;
-    len_dq = key->dqlen;
-    len_iq = key->iqlen;
-    
-    rsa_p = malloc(len_p);
-    memcpy(rsa_p, key->p, len_p);
-    
-    rsa_q = malloc(len_q);
-    memcpy(rsa_q, key->q, len_q);
-    
-    rsa_dp = malloc(len_dp);
-    memcpy(rsa_dp, key->dp, len_dp);
-    
-    rsa_dq = malloc(len_dq);
-    memcpy(rsa_dq, key->dq, len_dq);
-    
-    rsa_iq = malloc(len_iq);
-    memcpy(rsa_iq, key->iq, len_iq);
-}
+/* ---- Global RSA key ---- */
+extern br_rsa_private_key g_key;
 
-void encode_rsa_bearssl(br_rsa_private_key *key) {
-    // Restore key components from stored buffers (simulating secret injection)
-    key->p = rsa_p;
-    key->q = rsa_q;
-    key->dp = rsa_dp;
-    key->dq = rsa_dq;
-    key->iq = rsa_iq;
-    key->plen = len_p;
-    key->qlen = len_q;
-    key->dplen = len_dp;
-    key->dqlen = len_dq;
-    key->iqlen = len_iq;
-}
+/* ---- Shared RSA component buffers (used by both stub and loader) ---- */
+extern unsigned char *rsa_d, *rsa_p, *rsa_q, *rsa_dp, *rsa_dq, *rsa_iq;
+extern size_t len_d, len_p, len_q, len_dp, len_dq, len_iq;
 
-void free_rsa_bearssl(void) {
-    if (rsa_p) free(rsa_p);
-    if (rsa_q) free(rsa_q);
-    if (rsa_dp) free(rsa_dp);
-    if (rsa_dq) free(rsa_dq);
-    if (rsa_iq) free(rsa_iq);
-    
-    rsa_p = rsa_q = rsa_dp = rsa_dq = rsa_iq = NULL;
-}
+/* ---- Global EC key ---- */
+extern br_ec_private_key g_ec_key;
+
+/* ---- Shared EC component buffers ---- */
+extern unsigned char *ec_x;
+extern size_t len_ec_x;
+
+/* ---- Core lifecycle helpers ---- */
+
+/* Secure zero implementation (replacement for br_zero) */
+void secure_zero(void *p, size_t n);
+
+/* Free all allocated RSA component buffers and reset g_key */
+void free_rsa_bearssl_heap(void);
+
+/* Load RSA private key from PEM string (PKCS#1 or unencrypted PKCS#8) */
+int load_priv_from_pem_string(const char *pem);
+
+/* ---- Hooks for secret-injection analysis ---- */
+void decode_rsa_bearssl(const br_rsa_private_key *key);
+void encode_rsa_bearssl(br_rsa_private_key *key);
+void free_rsa_bearssl(void);
+void test_end(void);
+
+/* ---- EC key management ---- */
+int load_ec_priv_from_pem_string(const char *pem);
+void decode_ec_bearssl(const br_ec_private_key *key);
+void encode_ec_bearssl(br_ec_private_key *key);
+void free_ec_bearssl(void);
+void free_ec_bearssl_heap(void);
+
+#endif /* BEARSSL_COMMON_H */
