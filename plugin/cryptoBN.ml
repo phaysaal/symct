@@ -13,12 +13,12 @@ let get_constants env =
   let bvks i    = Bitvector.create (Z.of_int i) !key_size in
   let bvws i    = Bitvector.create (Z.of_int i) env.wordsize in
   let word_size = Size.Byte.create (env.wordsize/8) in
-  let bv32_one  = bvws 1 (* Bitvector.create (Z.of_int 1) (env.wordsize) *) in
-  let one       = Dba.Expr.constant bv32_one in
+  let bvpl_one  = bvws 1 in
+  let one       = Dba.Expr.constant bvpl_one in
   let bv_zero   = bvks 0 in
   let bv_one    = bvks 1 in
-  let bv32_zero = bvws 0 in
-  (dir, bvws, word_size, bv32_zero, bv32_one, one, bv_zero, bv_one)
+  let bvpl_zero = bvws 0 in
+  (dir, bvws, word_size, bvpl_zero, bvpl_one, one, bv_zero, bv_one)
   
 
 module type CryptoBN = sig
