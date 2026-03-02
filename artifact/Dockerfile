@@ -74,7 +74,7 @@ USER artifact
 WORKDIR /home/artifact/sct
 
 # Python scripts and config
-COPY --chown=artifact:artifact runbench.py callstack2source.py merge_reports.py keylen.json ./
+COPY --chown=artifact:artifact runbench.py callstack2source.py merge_reports.py keylen.json runall.py ./
 
 # OCaml plugin source
 COPY --chown=artifact:artifact plugin/ plugin/
@@ -83,8 +83,10 @@ COPY --chown=artifact:artifact plugin/ plugin/
 COPY --chown=artifact:artifact binsec/32/ binsec/32/
 
 # Benchmark: common inputs and main_template, and
+COPY --chown=artifact:artifact benchmark/32/ benchmark/32/
+
 # Benchmark: 32-bit libraries (static libs, headers, source code)
-COPY --chown=artifact:artifact benchmark/ benchmark/
+COPY --chown=artifact:artifact benchmark/common/ benchmark/common/
 
 # ============================================================================
 # Build OCaml plugin

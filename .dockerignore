@@ -5,6 +5,7 @@
 !runbench.py
 !callstack2source.py
 !merge_reports.py
+!runall.py
 !keylen.json
 
 # ---- OCaml plugin (source only) ----
