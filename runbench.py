@@ -81,7 +81,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    drive_test(args)
+    if not drive_test(args):
+        sys.exit(1)
 
 # ============================================================================ 
 # Test Driver Functions
@@ -89,9 +90,9 @@ def main():
 
 def drive_test(args):
     if args.batch_file:
-        batch_file_test(args)
+        return batch_file_test(args)
     else:
-        single_test(args)
+        return single_test(args)
 
 def batch_file_test(args):
     try:
@@ -103,9 +104,10 @@ def batch_file_test(args):
     print(f"[INFO] Running tests from batch file: {args.batch_file}")
     print("----------------------------------------")
 
+    all_ok = True
     for line_num, line in enumerate(lines):
         line = line.strip()
-        
+
         if not line or line.startswith('#'):
             continue
 
@@ -114,11 +116,13 @@ def batch_file_test(args):
         new_args.nature = line
 
         print(f"\n[TEST] {line_num + 1}: {line}")
-        single_test(new_args)
+        if not single_test(new_args):
+            all_ok = False
         print(f"[DONE] {line}")
 
     print("\n----------------------------------------")
     print("[OK] All tests from batch file completed")
+    return all_ok
 
 def single_test(args):
     # Build paths and configuration strings
@@ -194,7 +198,7 @@ def single_test(args):
     if args.build or args.startfrom == "core":
         if not prepare_benchmark(args.root, args.platform, library_str, args.algorithm):
             print(f"[ERROR] Failed to prepare benchmark, aborting", file=sys.stderr)
-            return
+            return False
 
     # Create output directory
     output_path = f"{args.root}/results/{args.platform}/{library_str}/{algorithm}"
@@ -220,6 +224,7 @@ def single_test(args):
     if report_dir:
         os.makedirs(report_dir, exist_ok=True)
     leaks_files = []
+    success = True
 
     # Run tests for each combination
     for name, c in all_combs:
@@ -255,7 +260,8 @@ def single_test(args):
         run_args = parts[1:]
 
         print(f"[CASE] {bn_scripts}")
-        run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit)
+        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+            success = False
 
         # Generate callstack2source report if --report is given
         if report_dir:
@@ -274,6 +280,8 @@ def single_test(args):
         merged_name = f"{args.library}_{algorithm}_{args.platform}{tag}.leaks"
         merged_file = os.path.join(report_dir, merged_name)
         run_merge_reports(leaks_files, merged_file)
+
+    return success
 
 # ============================================================================
 # Build and GDB Functions
@@ -599,6 +607,7 @@ def run_and_log(program, args, log_file_name, algorithm, nature, tag, memlimit_m
 
             if result.returncode == 0:
                 print(f"[OK] Output saved to {log_file_name}")
+                return True
             elif result.returncode == -9:
                 print(f"[KILLED] Out of memory (limit: {memlimit_mb} MB). See {log_file_name}", file=sys.stderr)
             else:
@@ -606,6 +615,8 @@ def run_and_log(program, args, log_file_name, algorithm, nature, tag, memlimit_m
 
     except Exception as e:
         print(f"[ERROR] Execution failed: {e}", file=sys.stderr)
+
+    return False
 
 if __name__ == "__main__":
     main()
