@@ -84,15 +84,16 @@ def run_test(test, root, timeout, memlimit):
     if test["optimization"]:
         cmd += ["--optimization", test["optimization"]]
 
+    cmd_str = " ".join(cmd)
     start = time.time()
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 60)
         elapsed = time.time() - start
-        return test["label"], result.returncode == 0, elapsed
+        return test["label"], result.returncode == 0, elapsed, cmd_str
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start
-        return test["label"], False, elapsed
+        return test["label"], False, elapsed, cmd_str
 
 
 def main():
@@ -127,7 +128,7 @@ def main():
         label = t["label"]
         print(f"[{i+1}/{len(tests)}] {label} ... ", end="", flush=True)
 
-        label, success, elapsed = run_test(t, root, args.timeout, args.memlimit)
+        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit)
 
         if success:
             print(f"OK ({elapsed:.0f}s)")
@@ -136,16 +137,17 @@ def main():
             print(f"FAIL ({elapsed:.0f}s)")
             failed += 1
 
-        results.append((label, success, elapsed))
+        results.append((label, success, elapsed, cmd_str))
 
     print("=" * 60)
     print(f"[SUMMARY] {passed} passed, {failed} failed, {len(tests)} total")
 
     if failed > 0:
         print("\nFailed tests:")
-        for label, success, elapsed in results:
+        for label, success, elapsed, cmd_str in results:
             if not success:
                 print(f"  - {label}")
+                print(f"    {cmd_str}")
         sys.exit(1)
 
 
