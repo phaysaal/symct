@@ -1,0 +1,33 @@
+CC = gcc
+SRC = wrapper.c main_template.c \
+      ../../../../common/inputs/plaintext.c \
+      ../../../../common/inputs/ec_private_key_pem.c \
+      ../../common.c
+
+CFLAGS = -I../../../../common/inputs -I. -I../.. \
+         -I../../lib/include \
+         -I../../lib/tf-psa-crypto/include \
+         -I../../lib/tf-psa-crypto/drivers/builtin/include \
+         -I../../lib/build/include \
+         -I../../lib/build/tf-psa-crypto/include \
+         -I../../lib/build/tf-psa-crypto/drivers/builtin/include \
+         -I../../lib/build/tests/include \
+         -I../../lib/framework/tests/include \
+         -I../../lib/tests/include \
+         -I../../lib/library \
+         -I../../lib/tf-psa-crypto/core \
+         -I../../lib/tf-psa-crypto/drivers/builtin/src \
+         -Wall -O0 -g \
+         -DEXAMPLE_ECDSA_SIGN -m32 -no-pie
+
+LDFLAGS = -L../../lib -lmbedtls -lmbedx509 -lmbedcrypto -ltfpsacrypto -ldl -lm -lpthread -m32
+
+TARGET = ../bin/ecdsa_sign_mbedtls_32
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CC) $(CFLAGS) $(SRC) $(LDFLAGS) -o $(TARGET)
+
+clean:
+	rm -f $(TARGET)

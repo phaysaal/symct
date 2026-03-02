@@ -1,0 +1,33 @@
+# Exclude everything by default
+*
+
+# ---- Python scripts ----
+!runbench.py
+!callstack2source.py
+!merge_reports.py
+!keylen.json
+
+# ---- OCaml plugin (source only) ----
+!plugin/
+plugin/_build/
+
+# ---- Binsec configs (only 32-bit ini files) ----
+!binsec/32/
+binsec/32/**/store*/
+binsec/32/**/claude/
+
+# ---- Benchmark: common inputs ----
+!benchmark/common/
+
+# ---- Benchmark: 32-bit libraries ----
+!benchmark/32/
+
+# Exclude build artifacts inside benchmark
+benchmark/32/**/*.o
+benchmark/32/**/*.core
+benchmark/32/**/bin/
+benchmark/32/**/*~
+benchmark/32/**/*.bak
+
+# ---- Dockerfile itself ----
+!artifact/Dockerfile

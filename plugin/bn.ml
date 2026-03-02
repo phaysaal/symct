@@ -36,7 +36,7 @@ end)
 module KeyLength = Builder.Integer (struct
     let doc = "Key length in bits"
     let name = "keylen"
-    let default = 1024
+    let default = 2048
   end)
 
 let backend_ref : (module CryptoBN.CryptoBN) ref =
@@ -44,14 +44,20 @@ let backend_ref : (module CryptoBN.CryptoBN) ref =
 
 let set_backend = function
   | `Openssl ->
-    Format.printf "OpenSSL is chosen";
+    Format.printf "OpenSSL is chosen\n";
     backend_ref := (module Opensslbn.OpenSSLBN : CryptoBN.CryptoBN)
-  | `Bearssl -> backend_ref := (module Bearsslbn.BearSSLBN  : CryptoBN.CryptoBN)
-  | `Wolfssl -> backend_ref := (module Wolfsslbn.WolfSSLBN  : CryptoBN.CryptoBN)
-  | `Mbedtls -> backend_ref := (module Mbedtlsbn.MbedTLSBN  : CryptoBN.CryptoBN)
+  | `Bearssl ->
+    Format.printf "BearSSL is chosen\n";
+    backend_ref := (module Bearsslbn.BearSSLBN  : CryptoBN.CryptoBN)
+  | `Wolfssl ->
+    Format.printf "WolfSSL is chosen\n";
+    backend_ref := (module Wolfsslbn.WolfSSLBN  : CryptoBN.CryptoBN)
+  | `Mbedtls ->
+    Format.printf "MbedTLS is chosen\n";
+    backend_ref := (module Mbedtlsbn.MbedTLSBN  : CryptoBN.CryptoBN)
 
 let set_keylen n =
-  Format.printf "%d is chosen as key len" n;
+  Format.printf "%d is chosen as key len\n" n;
   CryptoBN.key_size := n
 
 let grammar_extension =
@@ -388,7 +394,7 @@ let () =
         fun _stats path state ->
         if is_enabled () then (
           set_backend (Backend.get ());
-        set_keylen (KeyLength.get ());
+          set_keylen (KeyLength.get ());
           Some (module struct
             module P = (val path)
             module S = (val state)

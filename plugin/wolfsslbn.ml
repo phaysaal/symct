@@ -1,3 +1,23 @@
+(* WolfSSL sp_int Big Number format:
+ *
+ *   typedef struct sp_int {
+ *       sp_size_t    used;     -- unsigned int, number of used digits
+ *       sp_sign_t    sign;     -- uint8, sign indicator
+ *       sp_int_digit dp[];     -- digit array (XALIGNED to SP_WORD_SIZEOF)
+ *   };
+ *
+ *   sp_int_digit is uint32_t (32-bit) or uint64_t (64-bit).
+ *
+ *   Field offsets (fixed, independent of platform):
+ *     used:  0  (4 bytes, unsigned int)
+ *     sign:  4  (1 byte, uint8)
+ *     dp[]:  8  (aligned to SP_WORD_SIZEOF: 4 or 8)
+ *
+ *   Digit size (platform-dependent):
+ *     32-bit: 4 bytes (uint32_t), key_size/32 digits
+ *     64-bit: 8 bytes (uint64_t), key_size/64 digits
+ *)
+
 open CryptoBN
 
 open Binsec
@@ -6,124 +26,134 @@ open Types
 open BnScript
 
 module WolfSSLBN : CryptoBN = struct
+
+  (*
+     pushBN: Convert sp_int big number to bitvector
+
+     Reads:
+       used = @[bnp, 2]               (low 16 bits of unsigned int)
+       sign = @[bnp + 4, 1]           (uint8, 1 = negative)
+       data = @[bnp + 8, n * ws]      (sp_int_digit[], little-endian)
+
+     If sign == 1, the bitvector value is negated.
+  *)
   let pushBN env bv_stack bnp =
-    let (dir, bvws, word_size, bv32_zero, bv32_one, _, bv_zero, _) = CryptoBN.get_constants env in
+    let (dir, bvws, _, _, _, _, bv_zero, _) = CryptoBN.get_constants env in
+    let ws = env.wordsize / 8 in
+    let offset_sign = 4 in
+    let offset_dp = 8 in
+    let n_digits = !CryptoBN.key_size / 8 / ws in
     let bvx = CryptoBN.prefix_var "bv_" bnp in
     let var = eval_loc ~size:!CryptoBN.key_size bvx env in
     let rval = eval_expr bnp env in
-    let d = Dba.Expr.binary Dba.Binary_op.Plus rval (Dba.Expr.constant (bvws ((env.wordsize/8)+4)))   (* rval+8 for 32-bit or rval+12 *) in
-    let sign_byte = (Dba.Expr.binary Dba.Binary_op.Plus rval (Dba.Expr.constant (bvws (env.wordsize/8)))) in
-    (*  Format.printf "d: %a\n" Dba_printer.Ascii.pp_bl_term d; *)
+
+    (* dp[]: data at fixed offset 8 *)
+    let d = Dba.Expr.add rval (Dba.Expr.constant (bvws offset_dp)) in
+
+    (* ITE chain: select data based on used count *)
     let rec read_gen sz n falsep =
       if n <= 1 then
         let truep = Dba.Expr.constant bv_zero in
-        let cond = Dba.Expr.binary Dba.Binary_op.Eq sz (Dba.Expr.constant bv32_zero) in
+        let cond = Dba.Expr.binary Dba.Binary_op.Eq sz
+            (Dba.Expr.constant (bvws 0)) in
         Dba.Expr.ite cond truep falsep
       else
-        let p = Dba.Expr.load (Size.Byte.create ((n-1)*(env.wordsize/8))) dir d in
-        (* Format.printf "p: %a\n" Dba_printer.Ascii.pp_bl_term p; *)
+        let p = Dba.Expr.load (Size.Byte.create ((n - 1) * ws)) dir d in
         let truep = Dba.Expr.unary (Dba.Unary_op.Uext !CryptoBN.key_size) p in
-        let cond = Dba.Expr.binary Dba.Binary_op.Eq sz (Dba.Expr.constant (bvws (n-1)) ) in
-        read_gen sz (n-1) (Dba.Expr.ite cond truep falsep)
+        let cond = Dba.Expr.binary Dba.Binary_op.Eq sz
+            (Dba.Expr.constant (bvws (n - 1))) in
+        read_gen sz (n - 1) (Dba.Expr.ite cond truep falsep)
     in
 
-    let p = Dba.Expr.load (Size.Byte.create (!CryptoBN.key_size/8)) dir d (* @[d, 0x20] *) in
-    (* Format.printf "p: %a\nrval: %a\n" Dba_printer.Ascii.pp_bl_term p Dba_printer.Ascii.pp_bl_term rval; *)
-    let szaddr = rval in
-    (* Format.printf "szaddr: %a\n" Dba_printer.Ascii.pp_bl_term szaddr; *)
-    (* let trval = rval in *)
-    let sz = Dba.Expr.unary (Dba.Unary_op.Uext (env.wordsize)) (Dba.Expr.load (Size.Byte.create (env.wordsize/16)) dir szaddr) (* @[rval,4] *) in
-    (* Format.printf "sz: %a\n" Dba_printer.Ascii.pp_bl_term sz; *)
-    let rval = read_gen sz (!CryptoBN.key_size/8/(env.wordsize/8)) p (* Dba.Expr.unary (Dba.Unary_op.Uext key_size) p *) in
+    (* Load full data from dp *)
+    let p = Dba.Expr.load (Size.Byte.create (!CryptoBN.key_size / 8)) dir d in
+
+    (* Load used count: @[bnp, ws/2] then uext to env.wordsize *)
+    let sz = Dba.Expr.unary (Dba.Unary_op.Uext env.wordsize)
+        (Dba.Expr.load (Size.Byte.create (ws / 2)) dir rval) in
+
+    let rval_data = read_gen sz n_digits p in
     let evar = lval2exp var in
 
-    let vall = (Dba.Expr.load
-                         (Size.Byte.create 1)
-                         dir
-                         sign_byte
-                      ) in
-    let cond = (Dba.Expr.equal
-                      vall
-                      (Dba.Expr.constant (Bitvector.create (Z.of_int 1) 8))) in
-    
-    let rval2 = (Dba.Expr.ite
-                   cond
-                   (Dba.Expr.uminus evar)
-                   (evar)) in (* @[d+12,4] = 1 ? ~evar + 1 : evar *)
-    Stack.push rval2 bv_stack;
+    (* Load sign: @[bnp + 4, 1] (uint8) *)
+    let sign_addr = Dba.Expr.add rval
+        (Dba.Expr.constant (bvws offset_sign)) in
+    let sign_val = Dba.Expr.load (Size.Byte.create 1) dir sign_addr in
+    let is_negative = Dba.Expr.equal sign_val
+        (Dba.Expr.constant (Bitvector.create (Z.of_int 1) 8)) in
+    let rval_with_sign = Dba.Expr.ite is_negative
+        (Dba.Expr.uminus evar) evar in
+    Stack.push rval_with_sign bv_stack;
 
     (match var with
-       Var var ->
-       let i = Ir.Assign {var; rval} in
-       let i2 = Ir.Assign {var; rval=evar} in
-       (* let ip = Ir.Print (Output.Value (Output.Hex, evar)) in *)
-       Format.printf "i: %a\n" Ir.pp_fallthrough i;
-       Format.printf "i2: %a\n" Ir.pp_fallthrough i2;
-       [i; i2 (*; ip *)]
+     | Var var ->
+       let assign_data = Ir.Assign {var; rval = rval_data} in
+       let assign_final = Ir.Assign {var; rval = evar} in
+       [assign_data; assign_final]
      | _ -> failwith "Invalid Variable"
     )
 
-    
+  (*
+     popBN: Convert bitvector to sp_int big number
+
+     Writes:
+       @[bnp + 4, 1]  := sign (uint8: 1 if negative, 0 otherwise)
+       @[bnp, 2]      := used digit count (truncated to 16-bit unsigned short)
+       @[bnp + 8, ..] := abs(bvx) as sp_int_digit[] (little-endian)
+  *)
   let popBN env bv_stack bnp' =
-    let (dir, _, word_size, bv32_zero, bv32_one, one, _bv_zero, bv_one) = CryptoBN.get_constants env in
-    
+    let (dir, bvws, _, _, _, _, _, bv_one) = CryptoBN.get_constants env in
+    let ws = env.wordsize / 8 in
+    let offset_sign = 4 in
+    let offset_dp = 8 in
+    let n_digits = !CryptoBN.key_size / 8 / ws in
+
+    (* Compute digit count: ITE chain checking how many digits contain data *)
     let rec len_gen n z i bvx f =
-      if n <= 0 then (
-        let falsep = Dba.Expr.constant i in 
-        f falsep
-      ) else (
-        let cond  = Dba.Expr.binary Dba.Binary_op.LtU bvx (Dba.Expr.constant z) in
+      if n <= 0 then
+        f (Dba.Expr.constant i)
+      else
+        let cond = Dba.Expr.binary Dba.Binary_op.LtU bvx
+            (Dba.Expr.constant z) in
         let truep = Dba.Expr.constant i in
-        let c = (fun g -> f (Dba.Expr.ite cond truep g)) in
-        len_gen (n-1) (Bitvector.shift_left z 32) (Bitvector.add i bv32_one) bvx c
-      )
+        let c = fun g -> f (Dba.Expr.ite cond truep g) in
+        len_gen (n - 1) (Bitvector.shift_left z env.wordsize)
+            (Bitvector.add i (bvws 1)) bvx c
     in
 
-    let bvx = Stack.pop bv_stack in (* lval2exp bvx in *)
+    let bvx = Stack.pop bv_stack in
     let bnp : Expr.t = eval_expr bnp' env in
 
-    Format.printf "Pop 1\n";
-    (* (* size : size depends on operations and so should be generic *) 
-    let rval   = Dba.Expr.constant (Bitvector.create (Z.of_int ((!CryptoBN.key_size/8)/(env.wordsize/8))) (env.wordsize/2)) in (* 0x40 (16-bit) or ? *)
-    let offset = Dba.Expr.constant (Bitvector.create (Z.of_int ((env.wordsize/8)/2))     (env.wordsize)) in (* 2 for 32-bit, 4 for 64-bit*)
-    let addr   = Dba.Expr.add bnp offset in                                                               (* bn_p+2 (32-bit), bn_p+16 (64-bit) *)
-       let i1 = Ir.Store {base=None; dir; addr; rval} in                                                     (* dmax = @[bn_p+2,4]:=0x40/ @[bn_p+16,8]:=0x20 *) *)
-    
-    (* Sign *)
-    let cond = Dba.Expr.equal (Dba.Expr.bit_restrict (!CryptoBN.key_size-1) bvx) (Dba.Expr.constant (Bitvector.create (Z.of_int 1) 1)) in (* bv_x{MSB} = 1 *)
-    let truep = Dba.Expr.constant (Bitvector.create (Z.of_int 1) 8) in (* 1 *)
-    let falsep = Dba.Expr.constant (Bitvector.create (Z.of_int 0) (8)) in (* 0 (8-bit) *)
-    let rval = Dba.Expr.ite cond truep falsep in (* bv_x = 1 ? 1 : 0 *)
-    let offset = Dba.Expr.constant (Bitvector.create (Z.of_int (env.wordsize/8)) (env.wordsize)) in (* 4 or 8 *)
-    let addr   = Dba.Expr.add bnp offset in (* bn_p+4 for 32-bit *)
-    let i2 = Ir.Store {base=None; dir; addr; rval} in (* neg = @[bn_p+4,4] := bv_x{MSB} < 0 ? 1 : 0 *)
-    Format.printf "Pop 2\n";
-    
-    (* compute used *)
-    (* let var  = match bvx with Dba.Expr.Var v -> v | _ -> failwith "Invalid bvx" in *)
-    
-    let bvx = Dba.Expr.ite cond (Dba.Expr.unary Dba.Unary_op.UMinus bvx) bvx in 
+    (* sign: @[bnp + 4, 1] := MSB(bvx) ? 1 : 0 *)
+    let is_msb_set = Dba.Expr.equal
+        (Dba.Expr.bit_restrict (!CryptoBN.key_size - 1) bvx)
+        (Dba.Expr.constant (Bitvector.create (Z.of_int 1) 1)) in
+    let sign_val = Dba.Expr.ite is_msb_set
+        (Dba.Expr.constant (Bitvector.create (Z.of_int 1) 8))
+        (Dba.Expr.constant (Bitvector.create (Z.of_int 0) 8)) in
+    let sign_addr = Dba.Expr.add bnp
+        (Dba.Expr.constant (Bitvector.create (Z.of_int offset_sign) env.wordsize)) in
+    let store_sign = Ir.Store {base = None; dir; addr = sign_addr; rval = sign_val} in
 
-    Format.printf "Pop 4\n";
-    let addr   = bnp in (* Dba.Expr.add bnp offset in (* bn_p *) *)
-    let rval'  = len_gen (!CryptoBN.key_size/8/(env.wordsize/8)) bv_one bv32_zero bvx (fun x -> x) in
-    let rval : Dba.Expr.t = Dba.Expr.restrict 0 15 rval' in
-    Format.printf "Pop 5\n";
-    let i4 = Ir.Store {base=None; dir; addr; rval} in (* @[bn_p,2]  := 0x40 *)
-    Format.printf "Pop 6\n";
+    (* Compute abs(bvx) for data storage *)
+    let bvx = Dba.Expr.ite is_msb_set
+        (Dba.Expr.unary Dba.Unary_op.UMinus bvx) bvx in
 
-     
-    let offset = Dba.Expr.constant (Bitvector.create (Z.of_int (2*env.wordsize/8)) (env.wordsize)) in (* 8 for 32-bit *)
-    let addr   = Dba.Expr.add bnp offset in (* bn_p+8 for 32-bit *)
-    
-    (* let addr = Dba.Expr.load word_size dir bnp in *)
-    let rval = bvx (*  Dba.Expr.ite cond (Dba.Expr.unary Dba.Unary_op.UMinus bvx) bvx in (* Dba.Expr.v var in (* bv_x in *) *) *) in
+    (* used: @[bnp, 2] := digit count (truncated to 16-bit unsigned short) *)
+    let used_word = len_gen n_digits bv_one (bvws 0) bvx (fun x -> x) in
+    let used_val = Dba.Expr.restrict 0 15 used_word in
+    let store_used = Ir.Store {base = None; dir; addr = bnp; rval = used_val} in
 
-    let i5 = Ir.Store {base=None; dir; addr; rval} in (* @[pn_p+8, 64] := bv_x *)
-    Format.printf "i: %a\n" Ir.pp_fallthrough i5;
-    [i2;i4;i5]
+    (* dp[]: @[bnp + 8, key_size] := data *)
+    let dp_addr = Dba.Expr.add bnp
+        (Dba.Expr.constant (Bitvector.create (Z.of_int offset_dp) env.wordsize)) in
+    let store_data = Ir.Store {base = None; dir; addr = dp_addr; rval = bvx} in
+
+    Format.printf "store_sign: %a\n" Ir.pp_fallthrough store_sign;
+    Format.printf "store_used: %a\n" Ir.pp_fallthrough store_used;
+    Format.printf "store_data: %a\n" Ir.pp_fallthrough store_data;
+    [store_sign; store_used; store_data]
 end
 
 let () =
   Registry.register "wolfssl" (module WolfSSLBN : CryptoBN)
-    

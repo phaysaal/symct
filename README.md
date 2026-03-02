@@ -1,56 +1,191 @@
-# SCT
+# SCT -- Side-Channel Testing Framework
 
-## Benchmark
+A framework for automated constant-time analysis of cryptographic library implementations using symbolic execution (BINSEC) and SMT solving (Bitwuzla/Z3).
 
-### How to organize/create a benchmark
+## Tested Libraries
 
-- Under `benchmark` folder, select <PLATFORM> (32 or 64, so far) folder.
-- Under <PLATFORM> folder, select/create <LIBRARY> folder.
-- Under <LIBRARY> folder, select/create <ALGORITHM> (or Primitive) folder.
-- Under <LIBRARY>, place `common.h` file.
-- Under <ALGORITHM> select/create `src` and `bin` folder.
-- Under `src` folder, place `wrapper.c` and without changing any function names, implement according to your library, and make an approriate Makefile.
-- Under `bin` folder, gs.ini file and <ALGORITHM>_<LIBRARY_PLATFORM>_gdb_script.gdb need to be places.
-- Under <LIBRARY>, place `lib` folder.
-- Under `lib`, place library binaries and `include` folder.
+| Library | Optimization Levels |
+|---------|-------------------|
+| OpenSSL | O0, O2, O3 |
+| BearSSL | O0 |
+| WolfSSL | O0, O2 |
+| MbedTLS | O0 |
 
-### Compilations
+## Tested Algorithms
+
+`rsa_decrypt`, `rsa_sign`, `rsa_keygen`, `ecdsa_sign`, `ecdsa_keygen`, `eddsa_sign`, `eddsa_keygen`
+
+## Project Structure
 
 ```
-cd benchmark/<PLATFORM>/<LIBRARY>/<ALHORITHM>/src/
-make
-cd ../bin/
-gdb -x <ALGORITHM>_<LIBRARY>_<PLATFORM>_gdb_script.gdb <ALGORITHM>_<LIBRARY>_<PLATFORM>
+benchmark/
+  common/             Shared inputs (keys, templates)
+  32/<library>/        Per-library benchmarks
+    lib/               Pre-compiled static libraries and headers
+    common.h           Library-specific common header
+    <algorithm>/
+      src/             Makefile and wrapper.c
+      bin/             Built executables, core dumps, gs.ini
+
+binsec/
+  32/                  BINSEC configuration files (.ini)
+    <library>/         Library-specific stubs and hooks
+      random/          Randomization mode configs
+      progressive/     Progressive analysis steps
+
+plugin/                OCaml BINSEC plugin (bignum modeling)
+
+runbench.py            Main test driver
+callstack2source.py    Maps binary addresses to source locations
+merge_reports.py       Deduplicates violation reports across runs
+keylen.json            Key length configuration per library/algorithm
 ```
 
+## Quick Start (Docker)
 
+### Installing Docker (Native)
 
-## Binsec Plugin Install
+Use native Docker Engine, not Docker Desktop. Docker Desktop runs a VM with limited memory, which is problematic for SMT solvers.
 
-- Install OCaml
-- Install dune
-- Enter into `plugin` folder.
+On Ubuntu/Debian:
+
 ```
+sudo apt-get update
+sudo apt-get install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt-get update
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+```
+
+Add your user to the docker group (to avoid `sudo`):
+
+```
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+If you previously had Docker Desktop, remove its credential helper:
+
+```
+# In ~/.docker/config.json, delete the line:
+#   "credsStore": "desktop",
+```
+
+### Building and Running
+
+```
+docker build -f artifact/Dockerfile -t sct-artifact .
+docker run -it sct-artifact
+```
+
+Inside the container:
+
+```
+cd /home/artifact/sct
+python3 runbench.py openssl rsa_decrypt rsa_openssl --optimization O0 --bn
+```
+
+## Manual Setup
+
+### Prerequisites
+
+- GCC with 32-bit support (`gcc-multilib`)
+- GDB
+- Python 3
+- BINSEC 0.10.1 (OCaml/opam)
+- Bitwuzla (SMT solver)
+- Z3 (optional, alternative solver)
+
+### Plugin Install
+
+```
+cd plugin
 dune build @install
 dune install
 ```
 
+## Running an Analysis
 
-## Testng Tool
-
-### Building
-
-- Download and install rust programming environment (especially cargo) in the standard procedure.
 ```
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-```
-- Inside `driver` folder use --
-```
-cargo build
-cargo build --release
-cargo install --path .
+python3 runbench.py <library> <algorithm> <nature> [options]
 ```
 
+### Positional Arguments
 
-- Read driver/README.md to see how to run an analysis.
+| Argument | Description |
+|----------|-------------|
+| `library` | `openssl`, `bearssl`, `wolfssl`, `mbedtls` |
+| `algorithm` | e.g. `rsa_decrypt`, `ecdsa_sign`, `eddsa_keygen` |
+| `nature` | Test config name, e.g. `rsa_openssl`, `ecdsa_bearssl_nd`, `dry` |
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--optimization` | (none) | Optimization level: `O0`, `O2`, `O3` |
+| `--bn` | off | Enable bignum modeling plugin |
+| `--progressive <dir>` | (none) | Progressive analysis with stub folders |
+| `--only <step>` | (none) | Run only up to a specific progressive step |
+| `--random <mode>` | `rand` | Randomization: `rand` or `const` |
+| `--platform` | `32` | Target platform: `32`, `64`, `arm64` |
+| `--keylen` | 2048 | Key length in bits |
+| `--timeout` | 1800 | Analysis timeout in seconds |
+| `--memlimit` | 16384 | Memory limit in MB (0 = unlimited) |
+| `--build` | off | Force rebuild before analysis |
+| `--report <dir>` | (none) | Generate callstack2source reports |
+| `--batch-file <file>` | (none) | Run multiple natures from a file |
+| `--tag` | (none) | Tag suffix for log filenames |
+| `--no-details` | off | Disable debug output |
+
+### Examples
+
+Basic RSA analysis on OpenSSL at O0:
+
+```
+python3 runbench.py openssl rsa_decrypt rsa_openssl --optimization O0 --bn
+```
+
+ECDSA analysis on WolfSSL with progressive stubs:
+
+```
+python3 runbench.py wolfssl ecdsa_sign ecdsa_wolfssl --bn --progressive ecdsa
+```
+
+Force rebuild and run with report generation:
+
+```
+python3 runbench.py bearssl rsa_sign rsa_bearssl --build --bn --report reports/
+```
+
+Batch run with constant randomization:
+
+```
+python3 runbench.py openssl rsa_decrypt rsa_openssl --bn --random const --batch-file tests.txt
+```
+
+### Build Process
+
+When `--build` is used (or automatically when starting from core):
+
+1. Runs `make clean && make` in `benchmark/<platform>/<library>/<algorithm>/src/`
+2. Verifies the executable name matches the expected convention; renames if needed
+3. On 32-bit x86: runs GDB to capture `gs_base` and generate a core dump
+4. Writes `gs.ini` for BINSEC to use
+
+### Output
+
+Results are written to `results/<platform>/<library>/<algorithm>/`.
+
+## Adding a New Benchmark
+
+1. Under `benchmark/32/<library>/`, create `<algorithm>/src/` and `<algorithm>/bin/` directories.
+2. In `src/`, create `wrapper.c` implementing the crypto operation and a `Makefile` with `TARGET` set to the executable name.
+3. Place library headers under `<library>/lib/include/` and static libraries (`.a`) under `<library>/lib/`.
+4. Create a corresponding `.ini` config under `binsec/32/`.

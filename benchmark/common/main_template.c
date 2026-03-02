@@ -16,10 +16,10 @@ extern const unsigned char CIPHERTEXT[];
 extern const unsigned int CIPHERTEXT_LEN;
 #endif
 extern int rsa_decrypt_tester(const unsigned char *in, int inlen, unsigned char *out);
-#elif defined(EXAMPLE_SIGN)
+#elif defined(EXAMPLE_RSA_SIGN)
 extern const unsigned char PLAINTEXT[];
 extern const unsigned int PLAINTEXT_LEN;
-extern int sign_tester(const unsigned char *in, int inlen, unsigned char *out);
+extern int rsa_sign_tester(const unsigned char *in, int inlen, unsigned char *out);
 #elif defined(EXAMPLE_KEY_EXCHANGE)
 // Use a simulated symmetric session key (e.g., 32-byte nonce)
 unsigned char simulated_secret[32] = {
@@ -45,8 +45,8 @@ int main() {
 #else
     outlen = rsa_decrypt_tester(CIPHERTEXT, CIPHERTEXT_LEN, out);
 #endif
-#elif defined(EXAMPLE_SIGN)
-    outlen = sign_tester(PLAINTEXT, PLAINTEXT_LEN, out);
+#elif defined(EXAMPLE_RSA_SIGN)
+    outlen = rsa_sign_tester(PLAINTEXT, PLAINTEXT_LEN, out);
 #elif defined(EXAMPLE_KEY_EXCHANGE)
     outlen = key_exchange_tester(simulated_secret, sizeof(simulated_secret), out);
 #endif
