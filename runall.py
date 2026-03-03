@@ -102,8 +102,13 @@ def get_log_path(test, root, platform="32"):
     )
 
 
-def print_leak_summary(tests, root, results):
-    """Parse logs and print a leak analysis summary."""
+def print_leak_summary(tests, root, results, merged_files=None, individual_leaks=None):
+    """Parse logs and print a leak analysis summary with file paths."""
+    if merged_files is None:
+        merged_files = {}
+    if individual_leaks is None:
+        individual_leaks = {}
+
     # Categorize tests
     completed = []
     failures = []
@@ -128,9 +133,13 @@ def print_leak_summary(tests, root, results):
     all_libraries = sorted(set(t["library"] for t in tests))
     all_algorithms = sorted(set(t["algorithm"] for t in tests))
 
+    # Track per-test leak counts for file listing
+    test_leak_counts = {}
+
     for t in completed:
         log_path = get_log_path(t, root)
         leaks = parse_leaks(log_path)
+        test_leak_counts[t["label"]] = len(leaks)
         for addr, leak_type in leaks:
             leaks_by_library[t["library"]][leak_type] += 1
             leaks_by_algorithm[t["algorithm"]][leak_type] += 1
@@ -172,7 +181,139 @@ def print_leak_summary(tests, root, results):
 
     print()
     print(f"Total: {total_leaks} leaks across {len(tests)} primitives")
+
+    # Print merged report paths per library
+    if merged_files:
+        print()
+        print("Merged source-level reports (unique alerts per library):")
+        for lib in all_libraries:
+            if lib in merged_files:
+                print(f"  {lib:12s}: {merged_files[lib]}")
+
+    # Print detailed file listing
+    print()
+    print("Detailed output files:")
+    for t in tests:
+        label = t["label"]
+        log_path = get_log_path(t, root)
+        n_leaks = test_leak_counts.get(label, 0)
+        if os.path.exists(log_path):
+            leaks_path = individual_leaks.get(label)
+            if leaks_path:
+                print(f"  {label:40s}  log: {log_path}")
+                print(f"  {'':40s}  leaks: {leaks_path}  ({n_leaks} leaks)")
+            elif n_leaks > 0:
+                print(f"  {label:40s}  log: {log_path}  ({n_leaks} leaks)")
+            else:
+                print(f"  {label:40s}  log: {log_path}")
+
     print("=" * 62)
+
+
+def get_binary_path(test, root, platform="32"):
+    """Construct the debug binary path (non-.core) for a test."""
+    library_str = test["library"]
+    if test["optimization"]:
+        library_str = f"{test['library']}-{test['optimization']}"
+    algo = test["algorithm"]
+    return os.path.join(
+        root, "benchmark", platform, library_str, algo, "bin",
+        f"{algo}_{library_str}_{platform}"
+    )
+
+
+def run_callstack2source(log_file, binary_path, output_file):
+    """Run callstack2source.py to generate a .leaks report from a binsec log."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    callstack2source = os.path.join(script_dir, "callstack2source.py")
+
+    try:
+        result = subprocess.run(
+            [sys.executable, callstack2source, log_file, binary_path, output_file],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return True
+        else:
+            print(f"  [WARN] callstack2source failed for {os.path.basename(log_file)}", file=sys.stderr)
+            return False
+    except Exception as e:
+        print(f"  [WARN] callstack2source error: {e}", file=sys.stderr)
+        return False
+
+
+def run_merge_reports(leaks_files, output_file):
+    """Run merge_reports.py --uniq-source to deduplicate .leaks files."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    merge_reports = os.path.join(script_dir, "merge_reports.py")
+
+    try:
+        result = subprocess.run(
+            [sys.executable, merge_reports, '--uniq-source', '-o', output_file] + leaks_files,
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return True
+        else:
+            print(f"  [WARN] merge_reports failed", file=sys.stderr)
+            return False
+    except Exception as e:
+        print(f"  [WARN] merge_reports error: {e}", file=sys.stderr)
+        return False
+
+
+def generate_reports(tests, root, results, report_dir):
+    """Generate .leaks files via callstack2source, then merge per library.
+
+    Returns:
+        dict: library -> merged leaks file path (or None if merge failed)
+        dict: test label -> individual .leaks file path
+    """
+    os.makedirs(report_dir, exist_ok=True)
+    individual_leaks = {}  # label -> leaks_file
+    leaks_by_library = defaultdict(list)  # library -> [leaks_file, ...]
+
+    print()
+    print("[REPORT] Generating source-level leak reports...")
+
+    for t, (label, success, elapsed, cmd_str) in zip(tests, results):
+        log_path = get_log_path(t, root)
+        if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
+            continue
+
+        # Only generate .leaks for logs that contain leak lines
+        leaks = parse_leaks(log_path)
+        if not leaks:
+            continue
+
+        binary_path = get_binary_path(t, root)
+        if not os.path.exists(binary_path):
+            continue
+
+        library_str = t["library"]
+        if t["optimization"]:
+            library_str = f"{t['library']}-{t['optimization']}"
+
+        leaks_file = os.path.join(
+            report_dir, f"{library_str}_{t['algorithm']}.leaks"
+        )
+
+        print(f"  {label} -> {os.path.relpath(leaks_file)}")
+        if run_callstack2source(log_path, binary_path, leaks_file):
+            individual_leaks[label] = leaks_file
+            leaks_by_library[t["library"]].append(leaks_file)
+
+    # Merge per library
+    merged_files = {}  # library -> merged_file
+    for library, files in sorted(leaks_by_library.items()):
+        if not files:
+            continue
+        merged_file = os.path.join(report_dir, f"{library}_merged.leaks")
+        print(f"  [MERGE] {library}: {len(files)} files -> {os.path.relpath(merged_file)}")
+        if run_merge_reports(files, merged_file):
+            merged_files[library] = merged_file
+
+    return merged_files, individual_leaks
 
 
 def run_test(test, root, timeout, memlimit):
@@ -208,6 +349,8 @@ def main():
     parser.add_argument("--root", type=str, default=".", help="Project root directory")
     parser.add_argument("--library", type=str, action="append", default=None,
                         help="Filter by library (e.g. --library wolfssl). Comma-separated or repeated.")
+    parser.add_argument("--report", type=str, default="",
+                        help="Directory for .leaks reports and per-library merged reports")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
     args = parser.parse_args()
 
@@ -266,7 +409,14 @@ def main():
                 print(f"  - {label}")
                 print(f"    {cmd_str}")
 
-    print_leak_summary(tests, root, results)
+    merged_files = {}
+    individual_leaks = {}
+    if args.report:
+        merged_files, individual_leaks = generate_reports(
+            tests, root, results, args.report
+        )
+
+    print_leak_summary(tests, root, results, merged_files, individual_leaks)
 
     if failed > 0:
         sys.exit(1)

@@ -199,6 +199,7 @@ python3 runall.py [options]
 | `--memlimit` | 16384 | Memory limit in MB |
 | `--root` | `.` | Project root directory |
 | `--library` | (all) | Filter by library (comma-separated or repeated) |
+| `--report` | (none) | Directory for `.leaks` reports and per-library merged reports |
 | `--dry-run` | off | List tests without running |
 
 ### Examples
@@ -245,8 +246,29 @@ Leaks by algorithm:
   ecdsa_sign    : 3 control flow, 0 memory access
 
 Total: 23 leaks across 45 primitives
+
+Merged source-level reports (unique alerts per library):
+  openssl     : reports/openssl_merged.leaks
+  wolfssl     : reports/wolfssl_merged.leaks
+
+Detailed output files:
+  openssl-O0/rsa_decrypt                    log: results/32/openssl-O0/rsa_decrypt/rsa_openssl_0.log
+                                             leaks: reports/openssl-O0_rsa_decrypt.leaks  (8 leaks)
+  ...
 ==============================================================
 ```
+
+### Source-Level Reports (`--report`)
+
+When `--report <dir>` is given, `runall.py` runs `callstack2source.py` on each log that contains leaks to produce individual `.leaks` files, then merges them per library using `merge_reports.py --uniq-source` to deduplicate alerts at the source level:
+
+```
+python3 runall.py --library openssl --timeout 120 --report reports/
+```
+
+This generates:
+- `reports/<library-opt>_<algorithm>.leaks` — per-test source-level violation reports
+- `reports/<library>_merged.leaks` — deduplicated unique alerts across all optimization levels and algorithms for each library
 
 ## Adding a New Benchmark
 
