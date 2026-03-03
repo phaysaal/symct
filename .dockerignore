@@ -30,5 +30,6 @@ benchmark/32/**/bin/
 benchmark/32/**/*~
 benchmark/32/**/*.bak
 
-# ---- Dockerfile itself ----
+# ---- Artifact: Dockerfile and custom binsec ----
 !artifact/Dockerfile
+!artifact/binsec.tar.xz

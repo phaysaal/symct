@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # For bitwuzla build
     git cmake meson ninja-build \
     # Misc
-    sudo file curl ca-certificates \
+    sudo file curl ca-certificates less xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # ============================================================================
@@ -41,10 +41,19 @@ ENV CAML_LD_LIBRARY_PATH="/home/artifact/.opam/4.14.1/lib/stublibs:/home/artifac
 ENV OCAML_TOPLEVEL_PATH="/home/artifact/.opam/4.14.1/lib/toplevel"
 
 # ============================================================================
-# BINSEC
+# BINSEC dependencies (from opam) + custom BINSEC build (from tarball)
 # ============================================================================
 
-RUN eval $(opam env) && opam install binsec.0.10.1 fmt -y
+RUN eval $(opam env) && opam install menhir ocamlgraph zarith dune-site grain_dypgen toml fmt conf-gcc conf-g++ -y
+
+COPY --chown=artifact:artifact artifact/binsec.tar.xz /tmp/binsec.tar.xz
+RUN mkdir -p /home/artifact/binsec \
+    && cd /home/artifact/binsec \
+    && tar xf /tmp/binsec.tar.xz \
+    && eval $(opam env) \
+    && dune build @install \
+    && dune install \
+    && rm /tmp/binsec.tar.xz
 
 # ============================================================================
 # Bitwuzla (build from source for smtlib CLI)
