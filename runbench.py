@@ -309,6 +309,7 @@ def build_benchmark(root: str, platform: str, library_str: str, algorithm: str) 
         print(f"[ERROR] Source directory does not exist: {src_dir}", file=sys.stderr)
         return False
 
+    os.makedirs(bin_dir, exist_ok=True)
     print(f"[BUILD] {src_dir}")
 
     try:

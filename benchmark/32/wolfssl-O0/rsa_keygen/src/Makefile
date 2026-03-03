@@ -1,6 +1,6 @@
 # Makefile
 CC = gcc
-CFLAGS = -I../../../../common/inputs -I../.. -I../../lib \
+CFLAGS = -I../../../../common/inputs -I../.. -I../../lib -I../../lib/wolfssl \
 	-Wall -O0 -g -m32 -DEXAMPLE_RSA_GENERATE_KEY -DWOLFSSL_KEY_GEN -DWOLFSSL_SP_MATH -DWOLFSSL_SP_MATH_ALL -DWC_RSA_BLINDING -DHAVE_HASHDRBG -DHAVE_GETPID=1 -DSP_INT_BITS=4096 -no-pie
 
 # -Wl,--wrap=wc_RNG_GenerateBlock to intercept RNG

@@ -4,10 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "mbedtls/rsa.h"
+#include "mbedtls/private/rsa.h"
 #include "mbedtls/error.h"
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/entropy.h"
+#include "mbedtls/private/ctr_drbg.h"
+#include "mbedtls/private/entropy.h"
 
 /*
  * Mbed TLS RSA Key Generation Benchmark with RNG Interception
@@ -15,10 +15,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "mbedtls/rsa.h"
+#include "mbedtls/private/rsa.h"
 #include "mbedtls/error.h"
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/entropy.h"
+#include "mbedtls/private/ctr_drbg.h"
+#include "mbedtls/private/entropy.h"
 
 /* 1MB buffer */
 #define MAX_RAND_BYTES 2097152

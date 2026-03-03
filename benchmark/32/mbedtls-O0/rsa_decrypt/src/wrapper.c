@@ -7,8 +7,8 @@
 #include <stdlib.h>
 #include "mbedtls/private/rsa.h"
 #include "mbedtls/pem.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/private/entropy.h"
+#include "mbedtls/private/ctr_drbg.h"
 #include "mbedtls/error.h"
 #include "../../common.h"
 

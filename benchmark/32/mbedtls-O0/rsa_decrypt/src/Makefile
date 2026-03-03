@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -O0 -g -DEXAMPLE_RSA_DECRYPT -m32 -no-pie
-LDFLAGS = -L../../lib/build/library -lmbedtls -lmbedx509 -lmbedcrypto -ltfpsacrypto -ldl -lm -lpthread -m32
+LDFLAGS = -L../../lib -lmbedtls -lmbedx509 -lmbedcrypto -ltfpsacrypto -ldl -lm -lpthread -m32
 
 # Adjust include paths to be relative to the Makefile's location
 INCLUDES = \
@@ -8,10 +8,10 @@ INCLUDES = \
     -I../../../../common/inputs -I. \
     -I../../lib/tf-psa-crypto/include \
     -I../../lib/tf-psa-crypto/drivers/builtin/include \
-    -I../../lib/build/include \
-    -I../../lib/build/tf-psa-crypto/include \
-    -I../../lib/build/tf-psa-crypto/drivers/builtin/include \
-    -I../../lib/build/tests/include \
+    -I../../lib/include \
+    -I../../lib/tf-psa-crypto/include \
+    -I../../lib/tf-psa-crypto/drivers/builtin/include \
+    -I../../lib/tests/include \
     -I../../lib/framework/tests/include \
     -I../../lib/tests/include \
     -I../../lib/library \

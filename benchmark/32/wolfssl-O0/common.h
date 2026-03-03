@@ -17,24 +17,33 @@
 #include <string.h>
 #include <options.h>
 #include <wolfcrypt/rsa.h>
-#include <wolfcrypt/ecc.h>
-#include <wolfcrypt/ed25519.h>
 #include <wolfcrypt/integer.h> /* mp_ helpers */
-#include "poison.h"
+
+#if defined(EXAMPLE_ECDSA_SIGN) || defined(EXAMPLE_ECDSA_KEYGEN)
+#include <wolfcrypt/ecc.h>
+#endif
+
+#if defined(EXAMPLE_EDDSA_SIGN) || defined(EXAMPLE_EDDSA_KEYGEN)
+#include <wolfcrypt/ed25519.h>
+#endif
 
 static unsigned char *rsa_n = NULL, *rsa_e = NULL, *rsa_d = NULL;
 static unsigned char *rsa_p = NULL, *rsa_q = NULL, *rsa_dmp1 = NULL, *rsa_dmq1 = NULL, *rsa_iqmp = NULL;
 static unsigned int len_n = 0, len_e = 0, len_d = 0, len_p = 0, len_q = 0, len_dmp1 = 0, len_dmq1 = 0, len_iqmp = 0;
 
+#if defined(EXAMPLE_ECDSA_SIGN) || defined(EXAMPLE_ECDSA_KEYGEN)
 /* ECC key components */
 static unsigned char *ecc_k = NULL;  /* private key */
 static unsigned int len_ecc_k = 0;
+#endif
 
+#if defined(EXAMPLE_EDDSA_SIGN) || defined(EXAMPLE_EDDSA_KEYGEN)
 /* Ed25519 key components */
 static unsigned char *eddsa_private_key = NULL;  /* k field: 64 bytes (32 secret + 32 pub) */
 static unsigned char *eddsa_public_key = NULL;   /* p field: 32 bytes compressed public */
 static unsigned int len_eddsa_private_key = 0;
 static unsigned int len_eddsa_public_key = 0;
+#endif
 
 /* Extract components from a loaded RsaKey into the global buffers and len_* vars. */
 static void decode_rsa(RsaKey *key) {
@@ -67,26 +76,12 @@ static void decode_rsa(RsaKey *key) {
     if (len_dmp1) mp_to_unsigned_bin(&key->dP, rsa_dmp1);
     if (len_dmq1) mp_to_unsigned_bin(&key->dQ, rsa_dmq1);
     if (len_iqmp) mp_to_unsigned_bin(&key->u, rsa_iqmp);
-
-    
-    //poison(rsa_n, len_n);
-    //poison(rsa_e, len_e);
-    //poison(rsa_d, len_d);
-    //poison(rsa_p, len_p);
-    /*poison(rsa_q, len_q);
-    poison(rsa_dmp1, len_dmp1);
-    poison(rsa_dmq1, len_dmq1);
-    poison(rsa_iqmp, len_iqmp);
-    */
 }
 
 /* encode_rsa kept for compatibility with harness: here it does nothing special
    because main_template expects to print len_* that were filled by decode_rsa(). */
 static void encode_rsa(RsaKey *key) {
   /* Import FROM buffer TO key */
- 
-  
-  
   mp_read_unsigned_bin(&key->n, rsa_n, len_n);
   mp_read_unsigned_bin(&key->e, rsa_e, len_e);
   mp_read_unsigned_bin(&key->d, rsa_d, len_d);
@@ -98,8 +93,6 @@ static void encode_rsa(RsaKey *key) {
 }
 
 static void free_buf() {
-
-    /* Import FROM buffer TO key */
   if (rsa_n) free(rsa_n);
   if (rsa_e) free(rsa_e);
   if (rsa_d) free(rsa_d);
@@ -110,6 +103,7 @@ static void free_buf() {
   if (rsa_iqmp) free(rsa_iqmp);
 }
 
+#if defined(EXAMPLE_ECDSA_SIGN) || defined(EXAMPLE_ECDSA_KEYGEN)
 /* Extract ECC private key from ecc_key into global buffer */
 static void decode_ecc(ecc_key *key) {
     /* Extract the private key 'k' */
@@ -136,7 +130,9 @@ static void free_ecc_buf() {
     }
     len_ecc_k = 0;
 }
+#endif /* EXAMPLE_ECDSA_SIGN || EXAMPLE_ECDSA_KEYGEN */
 
+#if defined(EXAMPLE_EDDSA_SIGN) || defined(EXAMPLE_EDDSA_KEYGEN)
 /* Extract Ed25519 private key from ed25519_key into global buffer */
 static void decode_eddsa(ed25519_key *key) {
     /* Ed25519 k field contains 32-byte secret + 32-byte public = 64 bytes total */
@@ -175,5 +171,6 @@ static void free_eddsa_buf() {
     len_eddsa_private_key = 0;
     len_eddsa_public_key = 0;
 }
+#endif /* EXAMPLE_EDDSA_SIGN || EXAMPLE_EDDSA_KEYGEN */
 
 #endif /* COMMON_H_WOLFSSL */

@@ -7,8 +7,8 @@
 #include "mbedtls/pk.h"
 #include "mbedtls/private/ecdsa.h"
 #include "mbedtls/private/ecp.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/private/entropy.h"
+#include "mbedtls/private/ctr_drbg.h"
 #include "mbedtls/error.h"
 #include "psa/crypto.h"
 

@@ -2,7 +2,7 @@ SRC = wrapper.c main_template.c \
       ../../../../common/inputs/plaintext.c \
       ../../../../common/inputs/ec_private_key_pem.c
 
-CFLAGS = -I../../../../common/inputs -I. -I../.. -I../../lib/wolfssl -Wall -g \
+CFLAGS = -I../../../../common/inputs -I. -I../.. -I../../lib -I../../lib/wolfssl -Wall -g \
          -DEXAMPLE_ECDSA_SIGN -DWOLFSSL_NO_SP_MATH -m32
 
 # Link statically against libwolfssl.a in ../../lib

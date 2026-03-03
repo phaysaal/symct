@@ -4,10 +4,10 @@ CFLAGS = -I../../../../common/inputs -I. \
          -I../../lib/include \
          -I../../lib/tf-psa-crypto/include \
          -I../../lib/tf-psa-crypto/drivers/builtin/include \
-         -I../../lib/build/include \
-         -I../../lib/build/tf-psa-crypto/include \
-         -I../../lib/build/tf-psa-crypto/drivers/builtin/include \
-         -I../../lib/build/tests/include \
+         -I../../lib/include \
+         -I../../lib/tf-psa-crypto/include \
+         -I../../lib/tf-psa-crypto/drivers/builtin/include \
+         -I../../lib/tests/include \
          -I../../lib/framework/tests/include \
          -I../../lib/tests/include \
          -I../../lib/library \
