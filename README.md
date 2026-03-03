@@ -183,6 +183,71 @@ When `--build` is used (or automatically when starting from core):
 
 Results are written to `results/<platform>/<library>/<algorithm>/`.
 
+## Running All Tests
+
+`runall.py` discovers and runs all available benchmark tests, then prints a pass/fail summary followed by a leak analysis report.
+
+```
+python3 runall.py [options]
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--timeout` | 120 | Timeout per test in seconds |
+| `--memlimit` | 16384 | Memory limit in MB |
+| `--root` | `.` | Project root directory |
+| `--library` | (all) | Filter by library (comma-separated or repeated) |
+| `--dry-run` | off | List tests without running |
+
+### Examples
+
+List all discovered tests:
+
+```
+python3 runall.py --dry-run
+```
+
+Run only WolfSSL tests with a 2-minute timeout:
+
+```
+python3 runall.py --library wolfssl --timeout 120
+```
+
+Run OpenSSL and BearSSL tests:
+
+```
+python3 runall.py --library openssl,bearssl --timeout 120
+```
+
+### Leak Analysis Summary
+
+After all tests complete, `runall.py` parses each test's binsec log file for `[checkct:result]` leak lines and prints an aggregated summary:
+
+```
+==============================================================
+LEAK ANALYSIS SUMMARY
+==============================================================
+Primitives checked: 45
+  - Completed (reached timeout or finished): 41
+  - Build/run failures: 4
+
+Leaks by library:
+  openssl     : 12 control flow, 3 memory access  (15 total)
+  bearssl     :  0 control flow, 0 memory access   (0 total)
+  wolfssl     :  5 control flow, 1 memory access   (6 total)
+  mbedtls     :  2 control flow, 0 memory access   (2 total)
+
+Leaks by algorithm:
+  rsa_decrypt   : 8 control flow, 2 memory access
+  rsa_sign      : 5 control flow, 1 memory access
+  ecdsa_sign    : 3 control flow, 0 memory access
+
+Total: 23 leaks across 45 primitives
+==============================================================
+```
+
 ## Adding a New Benchmark
 
 1. Under `benchmark/32/<library>/`, create `<algorithm>/src/` and `<algorithm>/bin/` directories.

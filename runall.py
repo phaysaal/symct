@@ -4,9 +4,11 @@
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
+from collections import defaultdict
 
 # Algorithm -> nature prefix mapping
 NATURE_MAP = {
@@ -70,6 +72,109 @@ def find_all_tests(root):
     return tests
 
 
+LEAK_RE = re.compile(
+    r'\[checkct:result\]\s+Instruction\s+(0x[0-9a-fA-F]+)\s+has\s+(.+?)\s+leak\s+\(([0-9.]+)s\)'
+)
+
+
+def parse_leaks(log_file):
+    """Parse a binsec log file for leak lines. Returns list of (address, leak_type)."""
+    leaks = []
+    try:
+        with open(log_file, 'r') as f:
+            for line in f:
+                m = LEAK_RE.search(line)
+                if m:
+                    leaks.append((m.group(1), m.group(2)))
+    except (OSError, IOError):
+        pass
+    return leaks
+
+
+def get_log_path(test, root, platform="32"):
+    """Construct the expected log file path for a test."""
+    library_str = test["library"]
+    if test["optimization"]:
+        library_str = f"{test['library']}-{test['optimization']}"
+    return os.path.join(
+        root, "results", platform, library_str,
+        test["algorithm"], f"{test['nature']}_0.log"
+    )
+
+
+def print_leak_summary(tests, root, results):
+    """Parse logs and print a leak analysis summary."""
+    # Categorize tests
+    completed = []
+    failures = []
+    for t, (label, success, elapsed, cmd_str) in zip(tests, results):
+        if success:
+            completed.append(t)
+        else:
+            # Check if a log file exists (ran but failed vs build failure)
+            log_path = get_log_path(t, root)
+            if os.path.exists(log_path) and os.path.getsize(log_path) > 0:
+                completed.append(t)
+            else:
+                failures.append(t)
+
+    # Parse leaks from all completed tests
+    # Track by library and algorithm
+    leaks_by_library = defaultdict(lambda: defaultdict(int))
+    leaks_by_algorithm = defaultdict(lambda: defaultdict(int))
+    total_leaks = 0
+
+    # Collect all libraries and algorithms seen
+    all_libraries = sorted(set(t["library"] for t in tests))
+    all_algorithms = sorted(set(t["algorithm"] for t in tests))
+
+    for t in completed:
+        log_path = get_log_path(t, root)
+        leaks = parse_leaks(log_path)
+        for addr, leak_type in leaks:
+            leaks_by_library[t["library"]][leak_type] += 1
+            leaks_by_algorithm[t["algorithm"]][leak_type] += 1
+            total_leaks += 1
+
+    # Collect all leak types seen
+    all_leak_types = sorted(set(
+        lt for counts in list(leaks_by_library.values()) + list(leaks_by_algorithm.values())
+        for lt in counts
+    ))
+    if not all_leak_types:
+        all_leak_types = ["control flow", "memory access"]
+
+    # Print summary
+    print()
+    print("=" * 62)
+    print("LEAK ANALYSIS SUMMARY")
+    print("=" * 62)
+    print(f"Primitives checked: {len(tests)}")
+    print(f"  - Completed (reached timeout or finished): {len(completed)}")
+    print(f"  - Build/run failures: {len(failures)}")
+
+    print()
+    print("Leaks by library:")
+    for lib in all_libraries:
+        counts = leaks_by_library[lib]
+        parts = [f"{counts.get(lt, 0)} {lt}" for lt in all_leak_types]
+        lib_total = sum(counts.values())
+        print(f"  {lib:12s}: {', '.join(parts)}  ({lib_total} total)")
+
+    print()
+    print("Leaks by algorithm:")
+    for algo in all_algorithms:
+        counts = leaks_by_algorithm[algo]
+        if not counts:
+            continue
+        parts = [f"{counts.get(lt, 0)} {lt}" for lt in all_leak_types]
+        print(f"  {algo:14s}: {', '.join(parts)}")
+
+    print()
+    print(f"Total: {total_leaks} leaks across {len(tests)} primitives")
+    print("=" * 62)
+
+
 def run_test(test, root, timeout, memlimit):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
@@ -101,11 +206,23 @@ def main():
     parser.add_argument("--timeout", type=int, default=120, help="Timeout per test in seconds (default: 120)")
     parser.add_argument("--memlimit", type=int, default=16384, help="Memory limit in MB (default: 16384)")
     parser.add_argument("--root", type=str, default=".", help="Project root directory")
+    parser.add_argument("--library", type=str, action="append", default=None,
+                        help="Filter by library (e.g. --library wolfssl). Comma-separated or repeated.")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
     args = parser.parse_args()
 
     root = os.path.abspath(args.root)
     tests = find_all_tests(root)
+
+    if args.library:
+        # Flatten comma-separated values: --library wolfssl,openssl --library bearssl
+        allowed = set()
+        for item in args.library:
+            for lib in item.split(","):
+                lib = lib.strip()
+                if lib:
+                    allowed.add(lib)
+        tests = [t for t in tests if t["library"] in allowed]
 
     if not tests:
         print("[ERROR] No tests found", file=sys.stderr)
@@ -148,6 +265,10 @@ def main():
             if not success:
                 print(f"  - {label}")
                 print(f"    {cmd_str}")
+
+    print_leak_summary(tests, root, results)
+
+    if failed > 0:
         sys.exit(1)
 
 
