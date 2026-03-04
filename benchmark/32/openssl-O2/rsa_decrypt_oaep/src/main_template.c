@@ -1,0 +1,1 @@
+../../../../common/main_template.c

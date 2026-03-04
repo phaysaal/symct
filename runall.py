@@ -13,6 +13,7 @@ from collections import defaultdict
 # Algorithm -> nature prefix mapping
 NATURE_MAP = {
     "rsa_decrypt":  "rsa",
+    "rsa_decrypt_oaep": "rsa",
     "rsa_sign":     "rsa",
     "rsa_keygen":   "rsa_keygen",
     "ecdsa_sign":   "ecdsa",
@@ -20,6 +21,32 @@ NATURE_MAP = {
     "eddsa_sign":   "eddsa",
     "eddsa_keygen": "ed_keygen",
 }
+
+# Algorithm -> progressive directory name mapping
+# The progressive dir lives under binsec/<platform>/<library>/<progressive>/
+PROGRESSIVE_MAP = {
+    "rsa_decrypt":      "rsa",
+    "rsa_decrypt_oaep": "rsa",
+    "rsa_sign":         "rsa",
+    "rsa_keygen":       "keygen",
+    "ecdsa_sign":       "ecdsa",
+    "ecdsa_keygen":     "keygen",
+    "eddsa_sign":       "eddsa",
+    "eddsa_keygen":     "keygen",
+}
+
+# Library-specific overrides for PROGRESSIVE_MAP
+PROGRESSIVE_OVERRIDES = {
+    ("ecdsa_keygen", "mbedtls"): "eckeygen",
+}
+
+
+def get_progressive_dir(algo, library):
+    """Return the progressive directory name for a given algorithm and library."""
+    override = PROGRESSIVE_OVERRIDES.get((algo, library))
+    if override:
+        return override
+    return PROGRESSIVE_MAP.get(algo, "")
 
 
 def parse_library_dir(dirname):
@@ -316,7 +343,7 @@ def generate_reports(tests, root, results, report_dir):
     return merged_files, individual_leaks
 
 
-def run_test(test, root, timeout, memlimit):
+def run_test(test, root, timeout, memlimit, progressive=None):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
         sys.executable, os.path.join(root, "runbench.py"),
@@ -329,6 +356,11 @@ def run_test(test, root, timeout, memlimit):
 
     if test["optimization"]:
         cmd += ["--optimization", test["optimization"]]
+
+    if progressive is not None:
+        prog_dir = progressive if progressive else get_progressive_dir(test["algorithm"], test["library"])
+        if prog_dir:
+            cmd += ["--progressive", prog_dir]
 
     cmd_str = " ".join(cmd)
     start = time.time()
@@ -351,6 +383,8 @@ def main():
                         help="Filter by library (e.g. --library wolfssl). Comma-separated or repeated.")
     parser.add_argument("--report", type=str, default="",
                         help="Directory for .leaks reports and per-library merged reports")
+    parser.add_argument("--progressive", type=str, nargs="?", const="", default=None,
+                        help="Enable progressive mode. Optionally specify a directory override.")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
     args = parser.parse_args()
 
@@ -377,7 +411,12 @@ def main():
     if args.dry_run:
         for t in tests:
             opt = f" --optimization {t['optimization']}" if t["optimization"] else ""
-            print(f"  {t['label']:40s} -> {t['nature']}{opt}")
+            prog = ""
+            if args.progressive is not None:
+                prog_dir = args.progressive if args.progressive else get_progressive_dir(t["algorithm"], t["library"])
+                if prog_dir:
+                    prog = f" --progressive {prog_dir}"
+            print(f"  {t['label']:40s} -> {t['nature']}{opt}{prog}")
         return
 
     passed = 0
@@ -388,7 +427,7 @@ def main():
         label = t["label"]
         print(f"[{i+1}/{len(tests)}] {label} ... ", end="", flush=True)
 
-        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit)
+        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive)
 
         if success:
             print(f"OK ({elapsed:.0f}s)")
