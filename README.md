@@ -143,6 +143,145 @@ python3 runbench.py <library> <algorithm> <nature> [options]
 | `--batch-file <file>` | (none) | Run multiple natures from a file |
 | `--tag` | (none) | Tag suffix for log filenames |
 | `--no-details` | off | Disable debug output |
+| `--auto` | off | Auto mode: iterative stub discovery (see below) |
+
+### Auto Mode (`--auto`)
+
+Auto mode iteratively discovers which bignum (BN) functions need to be replaced with symbolic stubs so that the analysis can proceed past computationally expensive arithmetic. It runs the analysis, inspects the resulting trace, selects appropriate stub files, and repeats until no new stubs are found.
+
+```
+python3 runbench.py openssl rsa_decrypt rsa_openssl --optimization O0 --auto
+```
+
+#### Algorithm
+
+```
+accumulated_stubs = {}
+
+for iteration = 0, 1, 2, ...:
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 1. RUN BINSEC                                       │
+    │                                                     │
+    │    iteration 0: run WITHOUT --bn and without stubs  │
+    │    iteration N: run WITH --bn and accumulated_stubs │
+    └─────────────────────────────────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │ 2. PARSE LOG                                        │
+    │                                                     │
+    │  From [sse:debug] lines, extract:                   │
+    │    a. func_line_counts — how many trace lines each  │
+    │       function consumed                             │
+    │    b. addr_to_func — map instruction addresses to   │
+    │       function names                                │
+    │    c. call_graph — inferred caller→callee edges     │
+    │       from function transition pairs (A→B then B→A  │
+    │       = call/return; direction determined by which   │
+    │       transition was seen first in the trace)       │
+    │                                                     │
+    │  From [checkct:result] lines, extract:              │
+    │    d. leak_call_chains — for each leak, the full    │
+    │       call stack (#0, #1, ...) resolved to function │
+    │       names via addr_to_func (deepest first)        │
+    └─────────────────────────────────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │ 3. IDENTIFY TARGET BN FUNCTIONS                     │
+    │                                                     │
+    │  A function is a "target" if EITHER:                │
+    │                                                     │
+    │    a. It is a BN function that appears anywhere in  │
+    │       a leak call chain                             │
+    │                                                     │
+    │    b. BN functions collectively consume >75% of     │
+    │       trace lines (BN dominance) — in this case     │
+    │       ALL traced BN functions become targets        │
+    └─────────────────────────────────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │ 4. SEARCH FOR STUB FILES                            │
+    │                                                     │
+    │  Walk binsec/<platform>/<library>/ (excluding       │
+    │  random/) for .ini files containing:                │
+    │    replace <FUNC_NAME>(...) by ... end              │
+    │                                                     │
+    │  Filter by keylen: if a stub file contains          │
+    │    popBV var<SIZE>                                   │
+    │  then SIZE must match the resolved keylen.          │
+    │  Files without popBV are accepted for any keylen.   │
+    └─────────────────────────────────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │ 5. RESOLVE LEAKS VIA CALL CHAINS                    │
+    │                                                     │
+    │  For each leak's call chain (deepest → shallowest): │
+    │    Walk from #0 upward. Pick the first function     │
+    │    that is a BN function AND has a stub file.       │
+    │                                                     │
+    │  This handles the case where the leaking            │
+    │  instruction is inside a low-level function with    │
+    │  no stub — its caller (or caller's caller) may      │
+    │  have one.                                          │
+    └─────────────────────────────────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │ 6. RESOLVE DOMINANT FUNCTIONS VIA CALL GRAPH        │
+    │                                                     │
+    │  For each BN function consuming >5% of trace lines  │
+    │  that has NO stub file:                             │
+    │    Walk UP the inferred call graph (callee→caller), │
+    │    following the most frequent BN caller at each    │
+    │    step, up to 10 levels.                           │
+    │    Stop at the first ancestor that has a stub.      │
+    │                                                     │
+    │  Example: bn_mul_mont (79.6%, no stub)              │
+    │    → caller bn_mul_mont_fixed_top (has stub)        │
+    │    Stubbing the caller eliminates the callee too.   │
+    └─────────────────────────────────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │ 7. ACCUMULATE AND REPEAT                            │
+    │                                                     │
+    │  new_files = found stub files − accumulated_stubs   │
+    │                                                     │
+    │  if new_files is empty → STOP (converged)           │
+    │  else → add to accumulated_stubs, go to step 1     │
+    └─────────────────────────────────────────────────────┘
+
+After convergence:
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 8. FINAL RUN                                        │
+    │                                                     │
+    │  Run once more WITHOUT --bn and without stubs       │
+    │  (same configuration as iteration 0), but with      │
+    │  timeout = per_timeout × total_iterations.          │
+    │                                                     │
+    │  This gives the analysis the full accumulated time  │
+    │  budget to explore as far as possible without any   │
+    │  symbolic modeling, producing a baseline result.    │
+    └─────────────────────────────────────────────────────┘
+```
+
+#### BN Function Prefixes
+
+| Library | Prefixes |
+|---------|----------|
+| OpenSSL | `BN_`, `bn_` |
+| BearSSL | `br_i31_`, `br_i15_` |
+| WolfSSL | `sp_` |
+| MbedTLS | `mbedtls_mpi_` |
+
+#### Call Graph Inference
+
+The call graph is built from function transitions in `[sse:debug]` trace lines. When the trace shows function A executing, then function B, then A again, this indicates A called B. For each pair (A, B) where both A→B and B→A transitions exist, the **direction seen first** in the trace determines which is the caller. This is more reliable than a global first-seen heuristic because it correctly handles functions called by multiple callers at different points in the execution.
 
 ### Examples
 
