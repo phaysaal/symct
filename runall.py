@@ -366,7 +366,7 @@ def run_test(test, root, timeout, memlimit, progressive=None):
     start = time.time()
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 60)
+        result = subprocess.run(cmd, timeout=timeout + 60)
         elapsed = time.time() - start
         return test["label"], result.returncode == 0, elapsed, cmd_str
     except subprocess.TimeoutExpired:
@@ -425,15 +425,20 @@ def main():
 
     for i, t in enumerate(tests):
         label = t["label"]
-        print(f"[{i+1}/{len(tests)}] {label} ... ", end="", flush=True)
+        prog_info = ""
+        if args.progressive is not None:
+            prog_dir = args.progressive if args.progressive else get_progressive_dir(t["algorithm"], t["library"])
+            if prog_dir:
+                prog_info = f" [progressive={prog_dir}]"
+        print(f"[{i+1}/{len(tests)}] {label}{prog_info}")
 
         label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive)
 
         if success:
-            print(f"OK ({elapsed:.0f}s)")
+            print(f"  -> OK ({elapsed:.0f}s)")
             passed += 1
         else:
-            print(f"FAIL ({elapsed:.0f}s)")
+            print(f"  -> FAIL ({elapsed:.0f}s)")
             failed += 1
 
         results.append((label, success, elapsed, cmd_str))
