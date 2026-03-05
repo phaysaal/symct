@@ -310,6 +310,7 @@ AUTO_LEAK_RE = re.compile(
     r'\[checkct:result\]\s+Instruction\s+0x[0-9a-fA-F]+\s+has\s+.+?\s+leak'
 )
 REPLACE_DIRECTIVE_RE = re.compile(r'replace\s+<([a-zA-Z0-9_]+)>')
+POPBV_SIZE_RE = re.compile(r'popBV\s+\w+<(\d+)>')
 
 
 def is_bn_function(func_name, library):
@@ -373,10 +374,13 @@ def find_target_bn_functions(func_line_counts, leak_bn_funcs, library, threshold
     return target_funcs
 
 
-def find_stub_files_for_auto(binsec_root, library, platform, target_funcs):
+def find_stub_files_for_auto(binsec_root, library, platform, target_funcs, keylen=0):
     """For each target function, find the first .ini file that replaces it.
 
     Searches all subdirectories of binsec/<platform>/<library>/ (except random/).
+
+    If keylen > 0 and a file contains popBV with a bitvector size, only accept
+    the file if the size matches keylen. Files without popBV are always accepted.
 
     Returns:
         func_to_file: dict mapping function name -> file path
@@ -402,6 +406,12 @@ def find_stub_files_for_auto(binsec_root, library, platform, target_funcs):
                     content = f.read()
             except (OSError, IOError):
                 continue
+
+            # Check keylen compatibility via popBV bitvector sizes
+            if keylen > 0:
+                popbv_sizes = set(int(s) for s in POPBV_SIZE_RE.findall(content))
+                if popbv_sizes and keylen not in popbv_sizes:
+                    continue
 
             replaced_funcs = set(REPLACE_DIRECTIVE_RE.findall(content))
             for func in replaced_funcs:
@@ -557,7 +567,7 @@ def auto_test(args):
         print(f"[AUTO] Target functions ({len(target_funcs)}): {', '.join(sorted(target_funcs))}")
 
         # Find stub files for target functions
-        func_to_file = find_stub_files_for_auto(script_root, args.library, args.platform, target_funcs)
+        func_to_file = find_stub_files_for_auto(script_root, args.library, args.platform, target_funcs, resolved_keylen)
 
         # Determine new files not yet accumulated
         new_files = set(func_to_file.values()) - accumulated_stubs
