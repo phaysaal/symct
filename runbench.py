@@ -72,6 +72,7 @@ def parse_args():
     parser.add_argument("--report", type=str, default="", help="Directory for callstack2source report files")
     parser.add_argument("--build", action="store_true", help="Build the benchmark before running")
     parser.add_argument("--memlimit", type=int, default=16384, help="Memory limit in MB (default: 16384 = 16GB, 0 = unlimited)")
+    parser.add_argument("--auto", action="store_true", help="Auto mode: iteratively discover and add bignum stubs")
 
     return parser.parse_args()
 
@@ -89,7 +90,9 @@ def main():
 # ============================================================================ 
 
 def drive_test(args):
-    if args.batch_file:
+    if args.auto:
+        return auto_test(args)
+    elif args.batch_file:
         return batch_file_test(args)
     else:
         return single_test(args)
@@ -219,6 +222,10 @@ def single_test(args):
     else:
         all_combs = progressive_list(bn_dir, args.progressive, args.only)
 
+    if args.progressive:
+        step_names = [name for name, _ in all_combs]
+        print(f"[PROGRESSIVE] mode={args.progressive} steps={len(all_combs)} [{', '.join(step_names)}]")
+
     # Prepare report directory if requested
     report_dir = args.report
     if report_dir:
@@ -227,7 +234,8 @@ def single_test(args):
     success = True
 
     # Run tests for each combination
-    for name, c in all_combs:
+    total_combs = len(all_combs)
+    for idx, (name, c) in enumerate(all_combs, 1):
         bn_scripts = ""
         if c:
             bn_scripts = "," + ",".join(c)
@@ -259,6 +267,8 @@ def single_test(args):
         program = parts[0]
         run_args = parts[1:]
 
+        if args.progressive:
+            print(f"[STEP {idx}/{total_combs}] progressive={args.progressive} step={name}")
         print(f"[CASE] {bn_scripts}")
         if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
             success = False
@@ -282,6 +292,299 @@ def single_test(args):
         run_merge_reports(leaks_files, merged_file)
 
     return success
+
+# ============================================================================
+# Auto Mode — Iterative Bignum Stub Discovery
+# ============================================================================
+
+# Bignum function prefixes per library
+BN_PREFIXES = {
+    "openssl": ["BN_", "bn_"],
+    "bearssl": ["br_i31_", "br_i15_"],
+    "wolfssl": ["sp_"],
+    "mbedtls": ["mbedtls_mpi_"],
+}
+
+FUNC_ANNOTATION_RE = re.compile(r'#\s*<([a-zA-Z0-9_]+)>')
+AUTO_LEAK_RE = re.compile(
+    r'\[checkct:result\]\s+Instruction\s+0x[0-9a-fA-F]+\s+has\s+.+?\s+leak'
+)
+REPLACE_DIRECTIVE_RE = re.compile(r'replace\s+<([a-zA-Z0-9_]+)>')
+
+
+def is_bn_function(func_name, library):
+    """Check if a function name matches bignum prefixes for the given library."""
+    prefixes = BN_PREFIXES.get(library, [])
+    return any(func_name.startswith(p) for p in prefixes)
+
+
+def parse_log_for_auto(log_file, library):
+    """Parse a binsec log for auto mode analysis.
+
+    Returns:
+        func_line_counts: dict mapping function name -> number of [sse:debug] lines
+        leak_bn_funcs: set of BN function names that contain leaks
+    """
+    from collections import defaultdict
+    func_line_counts = defaultdict(int)
+    leak_bn_funcs = set()
+    last_func = None
+
+    try:
+        with open(log_file, 'r') as f:
+            for line in f:
+                # Track function annotations on [sse:debug] lines
+                if '[sse:debug]' in line:
+                    m = FUNC_ANNOTATION_RE.search(line)
+                    if m:
+                        func_name = m.group(1)
+                        func_line_counts[func_name] += 1
+                        last_func = func_name
+
+                # Detect leaks and associate with last seen function
+                if AUTO_LEAK_RE.search(line):
+                    if last_func and is_bn_function(last_func, library):
+                        leak_bn_funcs.add(last_func)
+    except (OSError, IOError):
+        pass
+
+    return func_line_counts, leak_bn_funcs
+
+
+def find_target_bn_functions(func_line_counts, leak_bn_funcs, library, threshold=0.75):
+    """Determine which BN functions need stubs.
+
+    Combines:
+    1. BN functions that contain leaks
+    2. BN functions that collectively account for >threshold of analysis lines
+    """
+    target_funcs = set(leak_bn_funcs)
+
+    total_lines = sum(func_line_counts.values())
+    if total_lines == 0:
+        return target_funcs
+
+    bn_counts = {f: c for f, c in func_line_counts.items() if is_bn_function(f, library)}
+    bn_total = sum(bn_counts.values())
+
+    if bn_total / total_lines > threshold:
+        target_funcs.update(bn_counts.keys())
+
+    return target_funcs
+
+
+def find_stub_files_for_auto(binsec_root, library, platform, target_funcs):
+    """For each target function, find the first .ini file that replaces it.
+
+    Searches all subdirectories of binsec/<platform>/<library>/ (except random/).
+
+    Returns:
+        func_to_file: dict mapping function name -> file path
+    """
+    lib_dir = os.path.join(binsec_root, platform, library)
+    if not os.path.isdir(lib_dir):
+        return {}
+
+    func_to_file = {}  # func_name -> file_path
+
+    for dirpath, dirnames, filenames in sorted(os.walk(lib_dir)):
+        # Skip random directory
+        if os.path.basename(dirpath) == "random":
+            dirnames.clear()
+            continue
+
+        for fname in sorted(filenames):
+            if not fname.endswith('.ini'):
+                continue
+            fpath = os.path.join(dirpath, fname)
+            try:
+                with open(fpath) as f:
+                    content = f.read()
+            except (OSError, IOError):
+                continue
+
+            replaced_funcs = set(REPLACE_DIRECTIVE_RE.findall(content))
+            for func in replaced_funcs:
+                if func in target_funcs and func not in func_to_file:
+                    func_to_file[func] = fpath
+
+    return func_to_file
+
+
+def auto_test(args):
+    """Auto mode: iteratively discover and add bignum stubs."""
+    script_root = f"{args.root}/binsec/"
+
+    base_ini = f"{script_root}{args.platform}/core.ini" if args.startfrom == "core" else \
+               f"{script_root}{args.platform}/{args.startfrom}"
+
+    library_str = args.library if not args.optimization else f"{args.library}-{args.optimization}"
+
+    base_dir = f"{script_root}{args.platform}/{args.library}"
+
+    # Base library stubs (loaded when bn is enabled)
+    base_stub_files = list_files(base_dir)
+    base_stubs = ("," + ",".join(base_stub_files)) if base_stub_files else ""
+
+    # Load keylen config and resolve
+    keylen_config = load_keylen_config(args.root)
+    resolved_keylen = args.keylen
+    try:
+        if args.library in keylen_config:
+            lib_conf = keylen_config[args.library]
+            if args.algorithm in lib_conf:
+                alg_conf = lib_conf[args.algorithm]
+                if args.platform in alg_conf:
+                    resolved_keylen = alg_conf[args.platform]
+    except Exception:
+        pass
+
+    bn_option = f"-bn -bn-backend {args.library} -bn-keylen {resolved_keylen} "
+
+    base_root_ini = base_ini if args.nature == "dry" else \
+                    f"{base_ini},{script_root}{args.platform}/{args.nature}.ini"
+
+    random_file = ""
+    random_dir = f"{script_root}{args.platform}/{args.library}/random"
+    if os.path.exists(random_dir):
+        if args.random == RandomMode.RANDOM.value:
+            random_file = f",{random_dir}/rand.ini"
+        else:
+            random_file = f",{random_dir}/const.ini"
+
+    algorithm = args.algorithm
+    nature = args.nature
+
+    gs_path = ""
+    if args.platform == Platform.X86.value:
+        gs_path = f",{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/gs.ini"
+
+    extra = f",{args.extra}" if args.extra else ""
+    tag = args.tag if not args.tag else f"_{args.tag}"
+
+    dbg = 0 if args.no_details else 2
+    if args.report and dbg < 2:
+        dbg = 2
+
+    # Determine binary path
+    if args.startfrom == "core":
+        binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}.core"
+    else:
+        binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}"
+
+    # Auto-build if starting from core or --build is specified
+    if args.build or args.startfrom == "core":
+        if not prepare_benchmark(args.root, args.platform, library_str, args.algorithm):
+            print(f"[ERROR] Failed to prepare benchmark, aborting", file=sys.stderr)
+            return False
+
+    # Create output directory
+    output_path = f"{args.root}/results/{args.platform}/{library_str}/{algorithm}"
+    os.makedirs(output_path, exist_ok=True)
+
+    # Auto mode iteration loop
+    accumulated_stubs = set()  # file paths discovered so far
+    iteration = 0
+    success = True
+
+    while True:
+        print(f"\n{'='*60}")
+        print(f"[AUTO] Iteration {iteration}")
+        print(f"{'='*60}")
+
+        if iteration == 0:
+            # First run: no bn, no stubs
+            use_bn = ""
+            use_base_stubs = ""
+            auto_scripts = ""
+        else:
+            use_bn = bn_option
+            use_base_stubs = base_stubs
+            auto_scripts = ("," + ",".join(sorted(accumulated_stubs))) if accumulated_stubs else ""
+
+        script_files = (
+            f"{base_root_ini},{script_root}{args.platform}/mem.ini"
+            f"{random_file}{gs_path}{extra}{use_base_stubs}{auto_scripts}"
+        )
+
+        log_file = f"{output_path}/{nature}_auto_{iteration}{tag}.log"
+
+        run_cmd = (
+            f"binsec -sse -checkct {use_bn}-sse-missing-symbol warn -sse-script {script_files} "
+            f"-sse-debug-level {dbg} -sse-depth 1000000000 "
+            f"-fml-solver-timeout 600 -sse-timeout {args.timeout} {binary_path} "
+            f"-smt-solver bitwuzla:smtlib"
+        )
+
+        parts = run_cmd.split()
+        if not parts:
+            break
+
+        program = parts[0]
+        run_args = parts[1:]
+
+        print(f"[AUTO] Accumulated stubs: {len(accumulated_stubs)} files")
+        for sf in sorted(accumulated_stubs):
+            print(f"  + {os.path.relpath(sf, args.root)}")
+
+        print(f"[CASE] auto iteration {iteration}")
+        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+            success = False
+
+        # Parse the log
+        func_counts, leak_bn_funcs = parse_log_for_auto(log_file, args.library)
+
+        total_lines = sum(func_counts.values())
+        bn_lines = sum(c for f, c in func_counts.items() if is_bn_function(f, args.library))
+
+        if total_lines > 0:
+            print(f"[AUTO] Analysis: {total_lines} traced lines, "
+                  f"{bn_lines} in BN functions ({100*bn_lines/total_lines:.1f}%)")
+        else:
+            print(f"[AUTO] No traced lines found in log")
+            break
+
+        # Find target BN functions
+        target_funcs = find_target_bn_functions(func_counts, leak_bn_funcs, args.library)
+
+        if leak_bn_funcs:
+            print(f"[AUTO] BN functions with leaks: {', '.join(sorted(leak_bn_funcs))}")
+
+        if not target_funcs:
+            print(f"[AUTO] No bignum functions to stub, stopping")
+            break
+
+        print(f"[AUTO] Target functions ({len(target_funcs)}): {', '.join(sorted(target_funcs))}")
+
+        # Find stub files for target functions
+        func_to_file = find_stub_files_for_auto(script_root, args.library, args.platform, target_funcs)
+
+        # Determine new files not yet accumulated
+        new_files = set(func_to_file.values()) - accumulated_stubs
+
+        if not new_files:
+            print(f"[AUTO] No new stub files found, stopping")
+            break
+
+        # Report what we found
+        print(f"[AUTO] Found {len(new_files)} new stub files:")
+        for fpath in sorted(new_files):
+            covered = [f for f, fp in func_to_file.items() if fp == fpath]
+            print(f"  + {os.path.relpath(fpath, args.root)} (replaces: {', '.join(sorted(covered))})")
+
+        # Report functions with no stub available
+        covered_funcs = set(func_to_file.keys())
+        missing = target_funcs - covered_funcs
+        if missing:
+            print(f"[AUTO] No stubs found for: {', '.join(sorted(missing))}")
+
+        accumulated_stubs.update(new_files)
+        iteration += 1
+
+    print(f"\n[AUTO] Completed after {iteration + 1} iteration(s)")
+    print(f"[AUTO] Total stubs used: {len(accumulated_stubs)}")
+    return success
+
 
 # ============================================================================
 # Build and GDB Functions
