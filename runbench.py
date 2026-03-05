@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument("--startfrom", type=str, default="core", help="Starting point (core, main, etc.)")
     parser.add_argument("--timeout", type=int, default=1800, help="Timeout in seconds")
     parser.add_argument("--no-details", action="store_true", help="Disable debug output")
-    parser.add_argument("--random", type=str, choices=[r.value for r in RandomMode], default=RandomMode.RANDOM.value, help="Randomization mode")
+    parser.add_argument("--random", type=str, choices=[r.value for r in RandomMode], default=RandomMode.CONSTANT.value, help="Randomization mode (default: const)")
     parser.add_argument("--extra", type=str, default="", help="Extra arguments")
     parser.add_argument("--tag", type=str, default="", help="Tag for log files")
     
