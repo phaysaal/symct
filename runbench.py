@@ -545,54 +545,113 @@ def auto_test(args):
         func_counts, leak_bn_funcs = parse_log_for_auto(log_file, args.library)
 
         total_lines = sum(func_counts.values())
-        bn_lines = sum(c for f, c in func_counts.items() if is_bn_function(f, args.library))
+        bn_counts = {f: c for f, c in func_counts.items() if is_bn_function(f, args.library)}
+        bn_lines = sum(bn_counts.values())
+        non_bn_counts = {f: c for f, c in func_counts.items() if not is_bn_function(f, args.library)}
 
-        if total_lines > 0:
-            print(f"[AUTO] Analysis: {total_lines} traced lines, "
-                  f"{bn_lines} in BN functions ({100*bn_lines/total_lines:.1f}%)")
-        else:
+        if total_lines == 0:
             print(f"[AUTO] No traced lines found in log")
             break
+
+        # ── Detailed analysis report ──
+        print()
+        print(f"  {'─'*56}")
+        print(f"  LOG ANALYSIS REPORT  (iteration {iteration})")
+        print(f"  {'─'*56}")
+        print(f"  Total traced lines : {total_lines}")
+        print(f"  BN function lines  : {bn_lines} ({100*bn_lines/total_lines:.1f}%)")
+        print(f"  Other lines        : {total_lines - bn_lines} ({100*(total_lines - bn_lines)/total_lines:.1f}%)")
+
+        # Top BN functions by line count
+        if bn_counts:
+            print()
+            print(f"  Top BN functions (by traced lines):")
+            for f, c in sorted(bn_counts.items(), key=lambda x: -x[1])[:15]:
+                pct = 100 * c / total_lines
+                leak_mark = " *** LEAK" if f in leak_bn_funcs else ""
+                print(f"    {f:40s} {c:8d}  ({pct:5.1f}%){leak_mark}")
+            if len(bn_counts) > 15:
+                print(f"    ... and {len(bn_counts) - 15} more")
+
+        # Top non-BN functions
+        if non_bn_counts:
+            print()
+            print(f"  Top non-BN functions:")
+            for f, c in sorted(non_bn_counts.items(), key=lambda x: -x[1])[:10]:
+                pct = 100 * c / total_lines
+                print(f"    {f:40s} {c:8d}  ({pct:5.1f}%)")
+            if len(non_bn_counts) > 10:
+                print(f"    ... and {len(non_bn_counts) - 10} more")
+
+        # Leak summary
+        if leak_bn_funcs:
+            print()
+            print(f"  BN functions containing leaks:")
+            for f in sorted(leak_bn_funcs):
+                c = func_counts.get(f, 0)
+                print(f"    {f:40s} {c:8d} lines")
 
         # Find target BN functions
         target_funcs = find_target_bn_functions(func_counts, leak_bn_funcs, args.library)
 
-        if leak_bn_funcs:
-            print(f"[AUTO] BN functions with leaks: {', '.join(sorted(leak_bn_funcs))}")
+        bn_dominant = bn_lines / total_lines > 0.75
+        print()
+        print(f"  BN dominance (>75%): {'YES' if bn_dominant else 'NO'} ({100*bn_lines/total_lines:.1f}%)")
 
         if not target_funcs:
-            print(f"[AUTO] No bignum functions to stub, stopping")
+            print(f"  No bignum functions to stub.")
+            print(f"  {'─'*56}")
             break
-
-        print(f"[AUTO] Target functions ({len(target_funcs)}): {', '.join(sorted(target_funcs))}")
 
         # Find stub files for target functions
         func_to_file = find_stub_files_for_auto(script_root, args.library, args.platform, target_funcs, resolved_keylen)
 
         # Determine new files not yet accumulated
         new_files = set(func_to_file.values()) - accumulated_stubs
+        covered_funcs = set(func_to_file.keys())
+        missing = target_funcs - covered_funcs
+
+        # Functions to be stubbed next
+        next_funcs = {f for f, fp in func_to_file.items() if fp in new_files}
+
+        print()
+        if next_funcs:
+            print(f"  Functions to stub NEXT ({len(next_funcs)}):")
+            for f in sorted(next_funcs):
+                fpath = func_to_file[f]
+                c = func_counts.get(f, 0)
+                leak_mark = " [LEAK]" if f in leak_bn_funcs else ""
+                print(f"    {f:40s} -> {os.path.basename(fpath)}{leak_mark}")
+
+        # Already-stubbed functions (from previous iterations)
+        already_stubbed = {f for f, fp in func_to_file.items() if fp in accumulated_stubs}
+        if already_stubbed:
+            print(f"  Already stubbed ({len(already_stubbed)}): {', '.join(sorted(already_stubbed))}")
+
+        # Missing stubs
+        if missing:
+            print(f"  No stubs available ({len(missing)}): {', '.join(sorted(missing))}")
+
+        print(f"  {'─'*56}")
 
         if not new_files:
-            print(f"[AUTO] No new stub files found, stopping")
+            print(f"\n[AUTO] No new stub files found, stopping")
             break
 
-        # Report what we found
-        print(f"[AUTO] Found {len(new_files)} new stub files:")
+        # Summary of new files being added
+        print(f"\n[AUTO] Adding {len(new_files)} new stub files:")
         for fpath in sorted(new_files):
             covered = [f for f, fp in func_to_file.items() if fp == fpath]
             print(f"  + {os.path.relpath(fpath, args.root)} (replaces: {', '.join(sorted(covered))})")
-
-        # Report functions with no stub available
-        covered_funcs = set(func_to_file.keys())
-        missing = target_funcs - covered_funcs
-        if missing:
-            print(f"[AUTO] No stubs found for: {', '.join(sorted(missing))}")
 
         accumulated_stubs.update(new_files)
         iteration += 1
 
     print(f"\n[AUTO] Completed after {iteration + 1} iteration(s)")
     print(f"[AUTO] Total stubs used: {len(accumulated_stubs)}")
+    if accumulated_stubs:
+        for sf in sorted(accumulated_stubs):
+            print(f"  {os.path.relpath(sf, args.root)}")
     return success
 
 
