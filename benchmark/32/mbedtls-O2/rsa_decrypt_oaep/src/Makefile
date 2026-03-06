@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -O0 -g -DEXAMPLE_RSA_DECRYPT -DOAEP -m32 -no-pie
+CFLAGS = -Wall -O2 -g -DEXAMPLE_RSA_DECRYPT -DOAEP -m32 -no-pie
 LDFLAGS = -L../../lib -lmbedtls -lmbedx509 -lmbedcrypto -ltfpsacrypto -ldl -lm -lpthread -m32
 
 # Adjust include paths to be relative to the Makefile's location
@@ -22,7 +22,7 @@ SRC = wrapper.c main_template.c ../../common.c \
       ../../../../common/inputs/ciphertext.c \
       ../../../../common/inputs/private_key_pem.c
 
-TARGET = ../bin/rsa_decrypt_oaep_mbedtls_32
+TARGET = ../bin/rsa_decrypt_oaep_mbedtls-O2_32
 
 .PHONY: all clean
 

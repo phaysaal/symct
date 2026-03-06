@@ -17,12 +17,12 @@ CFLAGS = -I../../../../common/inputs -I. -I../.. \
          -I../../lib/library \
          -I../../lib/tf-psa-crypto/core \
          -I../../lib/tf-psa-crypto/drivers/builtin/src \
-         -Wall -O0 -g \
+         -Wall -O2 -g \
          -DEXAMPLE_ECDSA_SIGN -m32 -no-pie
 
 LDFLAGS = -L../../lib -lmbedtls -lmbedx509 -lmbedcrypto -ltfpsacrypto -ldl -lm -lpthread -m32
 
-TARGET = ../bin/ecdsa_sign_mbedtls_32
+TARGET = ../bin/ecdsa_sign_mbedtls-O2_32
 
 all: $(TARGET)
 

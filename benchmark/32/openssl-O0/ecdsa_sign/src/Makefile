@@ -9,7 +9,7 @@ CFLAGS = -I../../../../common/inputs -I. -I../../lib/include \
 LDFLAGS = -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -ldl -m32
 
 all:
-	cc $(CFLAGS) $(SRC) -o ../bin/ecdsa_sign_openssl_32 $(LDFLAGS)
+	cc $(CFLAGS) $(SRC) -o ../bin/ecdsa_sign_openssl-O0_32 $(LDFLAGS)
 
 clean:
-	rm -f ../bin/ecdsa_sign_openssl_32
+	rm -f ../bin/ecdsa_sign_openssl-O0_32

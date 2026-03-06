@@ -14,7 +14,7 @@ SOURCES = wrapper.c main_template.c \
 	../../common.c
 
 OBJECTS = $(SOURCES:.c=.o)
-TARGET = ../bin/rsa_sign_bearssl_32
+TARGET = ../bin/rsa_sign_bearssl-O0_32
 
 all: $(TARGET)
 

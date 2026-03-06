@@ -1,0 +1,252 @@
+[sse:debug] Running SSE on /home/faisal/code/lsl/sct/benchmark/32/openssl-O0/rsa_decrypt_oaep/bin/rsa_decrypt_oaep_openssl-O0_32.core
+OpenSSL is chosen
+2048 is chosen as key len
+[sse:debug] starting from core
+                                                        hook <tester_main:last> with
+                                                          reach
+                                                        end
+                                                        explore all
+                                                        hook <tester_main:last> with
+                                                          cut 
+                                                        end
+                                                        rsa_dd<sizeof(@[@[<rsa_d>, 4], 256])> := taint secret
+                                                        @[@[<rsa_d>, 4], 256] := rsa_dd<sizeof(@[@[<rsa_d>, 4], 256])>
+                                                        rsa_pp<sizeof(@[@[<rsa_p>, 4], 128])> := taint secret
+                                                        @[@[<rsa_p>, 4], 128] := rsa_pp<sizeof(@[@[<rsa_p>, 4], 128])>
+                                                        rsa_qq<sizeof(@[@[<rsa_q>, 4], 128])> := taint secret
+                                                        @[@[<rsa_q>, 4], 128] := rsa_qq<sizeof(@[@[<rsa_q>, 4], 128])>
+                                                        rsa_dmp11<sizeof(@[@[<rsa_dmp1>, 4], 128])> := taint secret
+                                                        @[@[<rsa_dmp1>, 4], 128] := rsa_dmp11<sizeof(@[@[<rsa_dmp1>, 4], 128])>
+                                                        rsa_dmq11<sizeof(@[@[<rsa_dmq1>, 4], 128])> := taint secret
+                                                        @[@[<rsa_dmq1>, 4], 128] := rsa_dmq11<sizeof(@[@[<rsa_dmq1>, 4], 128])>
+                                                        rsa_iqmpp<sizeof(@[@[<rsa_iqmp>, 4], 128])> := taint secret
+                                                        @[@[<rsa_iqmp>, 4], 128] := rsa_iqmpp<sizeof(@[@[<rsa_iqmp>, 4], 128])>
+                                                        base_addr<32> := 0x1fff0000
+                                                        hook <printf> with
+                                                          nop
+                                                          return 1
+                                                        end
+                                                        hook <putchar> with
+                                                          nop
+                                                          return 97
+                                                        end
+                                                        hook <fwrite> with
+                                                          return 1
+                                                        end
+                                                        hook <malloc> with
+                                                          sz := arg(0)
+                                                          ret_val<32> := base_addr
+                                                          base_addr := (base_addr + sz)
+                                                          return ret_val
+                                                        end
+                                                        hook <free> with
+                                                          nop
+                                                          return 0
+                                                        end
+                                                        hook <fprintf> with
+                                                          nop
+                                                          return 1
+                                                        end
+                                                        hook <RAND_bytes_ex> with
+                                                          strength := arg(3)
+                                                          num := arg(2)
+                                                          buf := arg(1)
+                                                          ctx := arg(0)
+                                                          print hexa num
+                                                          i<32> := 0
+                                                          %4:
+                                                          if (i<32> <=s num) then goto %5
+                                                          goto %6
+                                                          %5:
+                                                          @[(buf + i), 1] := nondet
+                                                          i<32> := (i<32> + 1)
+                                                          goto %4
+                                                          %6:
+                                                          return
+                                                        end
+                                                        gs_base<32> := 0xf7fc2580
+                                                        hook <BN_clear_free> with
+                                                          nop
+                                                          return 0
+                                                        end
+                                                        hook <BN_free> with
+                                                          nop
+                                                          return 0
+                                                        end
+                                                        hook <CRYPTO_malloc> with
+                                                          sz := arg(0)
+                                                          ret_val<32> := base_addr
+                                                          base_addr := (base_addr + sz)
+                                                          return ret_val
+                                                        end
+                                                        hook <CRYPTO_free> with
+                                                          nop
+                                                          return 0
+                                                        end
+                                                        hook <CRYPTO_clear_free> with
+                                                          nop
+                                                          return 0
+                                                        end
+                                                        hook <OPENSSL_cleanse> with
+                                                          nop
+                                                          return 0
+                                                        end
+                                                        def mk_safe( ... )
+@[(p + 4), 4] := (0b1 & (@[p, 4] = 0x0)) ? 0x0 : @[(p + 4), 4], @[(p + 8), 4] := (0b1 & (@[p, 4] = 0x0)) ? 0x10 : @[(p + 8), 4], @[(p + 12), 4] := (0b1 & (@[p, 4] = 0x0)) ? 0 : @[(p + 12), 4], @[p, 4] := (0b1 & (@[p, 4] = 0x0)) ? base_addr : @[p, 4], base_addr := (base_addr + 0x100)
+end
+                                                        def mk_d_safe( ... )
+@[base_addr, 256] := @[@[p, 4], 256], @[p, 4] := base_addr, base_addr := (base_addr + 0x100)
+end
+                                                        hook <ERR_put_error> with
+                                                          return 0
+                                                        end
+                                                        hook <BN_bin2bn> with
+                                                          bin2bn2_s_ret := arg(2)
+                                                          bin2bn2_s_len := arg(1)
+                                                          bin2bn2_s := arg(0)
+                                                          new_addr<32> := (0b1 & (bin2bn2_s_ret = 0)) ? (base_addr + 0x14) : base_addr
+                                                          bin2bn2_s_ret := (0b1 & (bin2bn2_s_ret = 0)) ? base_addr : bin2bn2_s_ret
+                                                          base_addr := new_addr
+                                                          @[bin2bn2_s_ret, 4] := base_addr
+                                                          base_addr := (base_addr + 0x100)
+                                                          d_tmp<32> := 0x2f000000
+                                                          @[d_tmp, 256] := 0
+                                                          i<32> := 0
+                                                          %10:
+                                                          if (i<32> <=s (bin2bn2_s_len - 1)) then goto %11
+                                                          goto %12
+                                                          %11:
+                                                          @[(d_tmp + i), 1] := @[(((bin2bn2_s + bin2bn2_s_len) - i) - 1), 1]
+                                                          i<32> := (i<32> + 1)
+                                                          goto %10
+                                                          %12:
+                                                          bin2bn2_s_bv<2056> := (uext2056 @[d_tmp, 256])
+                                                          PushBV bin2bn2_s_bv
+                                                          PopBN bin2bn2_s_ret
+                                                          print hexa bin2bn2_s_ret
+                                                          return bin2bn2_s_ret
+                                                        end
+                                                        hook <BN_num_bits> with
+                                                          nb_bn := arg(0)
+                                                          print hexa nb_bn
+                                                          print hexa @[nb_bn, 4]
+                                                          print hexa @[(nb_bn + 4), 4]
+                                                          print hexa @[@[nb_bn, 4], 256]
+                                                          PushBN nb_bn
+                                                          PopBV nb_bn_bv<2056>
+                                                          print hexa nb_bn_bv
+                                                          btln<32> := 0
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 1024)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 1024)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 512)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 512)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 256)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 256)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 128)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 128)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 64)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 64)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 32)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 32)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 16)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 16)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 8)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 8)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 4)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 4)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 2)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 2)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          nb_bn_bv_p<2056> := (nb_bn_bv >>u 1)
+                                                          btln := (0b1 & (nb_bn_bv_p = 0)) ? btln : (btln + 1)
+                                                          nb_bn_bv := (0b1 & (nb_bn_bv_p = 0)) ? nb_bn_bv : nb_bn_bv_p
+                                                          btln := (0b1 & (nb_bn_bv = 0)) ? btln : (btln + 1)
+                                                          return btln
+                                                        end
+                                                        hook <BN_mod_mul_montgomery> with
+                                                          nop
+                                                          modmul_mont := arg(3)
+                                                          modmul_b := arg(2)
+                                                          modmul_a := arg(1)
+                                                          modmul_r := arg(0)
+                                                          modmul_ri<32> := @[modmul_mont, 4]
+                                                          modmul_RR<5112> := (1 << (uext5112 modmul_ri))
+                                                          modmul_N<32> := (modmul_mont + 24)
+                                                          modmul_Ni<32> := (modmul_mont + 44)
+                                                          PushBN modmul_N
+                                                          PopBV modmul_N_bv<2056>
+                                                          modmul_N_bv4<5112> := (uext5112 modmul_N_bv)
+                                                          PushBN modmul_a
+                                                          PopBV modmul_a_bv<2056>
+                                                          modmul_a_bv4<5112> := (uext5112 (modmul_a_bv %u modmul_N_bv))
+                                                          PushBN modmul_b
+                                                          PopBV modmul_b_bv<2056>
+                                                          modmul_b_bv4<5112> := (uext5112 (modmul_b_bv %u modmul_N_bv))
+                                                          PushBN modmul_Ni
+                                                          PopBV modmul_Ni_bv<2056>
+                                                          modmul_Ni_bv4<5112> := (uext5112 modmul_Ni_bv)
+                                                          modmul_t<5112> := (modmul_a_bv4 * modmul_b_bv4)
+                                                          modmul_mu<5112> := ((modmul_t * modmul_Ni_bv4) %u modmul_RR)
+                                                          modmul_s<5112> := (modmul_t + (modmul_mu * modmul_N_bv4))
+                                                          modmul_u<5112> := (modmul_s >>u (uext5112 modmul_ri))
+                                                          modmul_u := (0b1 & (modmul_u >=u modmul_N_bv4)) ? (modmul_u - modmul_N_bv4) : modmul_u
+                                                          modmul_r_bv<2056> := modmul_u{2055..0}
+                                                          PushBV modmul_r_bv
+                                                          PopBN modmul_r
+                                                          return 1
+                                                        end
+                                                        hook <bn_mul_mont_fixed_top> with
+                                                          nop
+                                                          modmul_mont := arg(3)
+                                                          modmul_b := arg(2)
+                                                          modmul_a := arg(1)
+                                                          modmul_r := arg(0)
+                                                          modmul_ri<32> := @[modmul_mont, 4]
+                                                          modmul_RR<5112> := (1 << (uext5112 modmul_ri))
+                                                          modmul_N<32> := (modmul_mont + 24)
+                                                          modmul_Ni<32> := (modmul_mont + 44)
+                                                          PushBN modmul_N
+                                                          PopBV modmul_N_bv<2056>
+                                                          modmul_N_bv4<5112> := (uext5112 modmul_N_bv)
+                                                          PushBN modmul_a
+                                                          PopBV modmul_a_bv<2056>
+                                                          modmul_a_bv4<5112> := (uext5112 (modmul_a_bv %u modmul_N_bv))
+                                                          PushBN modmul_b
+                                                          PopBV modmul_b_bv<2056>
+                                                          modmul_b_bv4<5112> := (uext5112 (modmul_b_bv %u modmul_N_bv))
+                                                          PushBN modmul_Ni
+                                                          PopBV modmul_Ni_bv<2056>
+                                                          modmul_Ni_bv4<5112> := (uext5112 modmul_Ni_bv)
+                                                          modmul_t<5112> := (modmul_a_bv4 * modmul_b_bv4)
+                                                          modmul_mu<5112> := ((modmul_t * modmul_Ni_bv4) %u modmul_RR)
+                                                          modmul_s<5112> := (modmul_t + (modmul_mu * modmul_N_bv4))
+                                                          modmul_u<5112> := (modmul_s >>u (uext5112 modmul_ri))
+                                                          modmul_u := (0b1 & (modmul_u >=u modmul_N_bv4)) ? (modmul_u - modmul_N_bv4) : modmul_u
+                                                          modmul_r_bv<2056> := modmul_u{2055..0}
+                                                          PushBV modmul_r_bv
+                                                          PopBN modmul_r
+                                                          return 1
+                                                        end
+[sse:debug] 56555000 :: 0x56555000-0x56584000 00000000 /home/faisal/code/lsl/sct/benchmark/32/openssl-O0/rsa_decrypt_oaep/bin/rsa_decrypt_oaep_openssl-O0_32
+[sse:debug] f7d68000 :: 0xf7d68000-0xf7d8b000 00000000 /usr/lib/i386-linux-gnu/libc.so.6
+[sse:debug] f7fc9000 :: 0xf7fc9000-0xf7fca000 00000000 /usr/lib/i386-linux-gnu/ld-linux.so.2
+[sse:debug] 0x00000000 anonymous
+[sse:debug] 0x00000000 anonymous
+[sse:debug] 0x00000000 anonymous
+[sse:debug] 0x00000000 anonymous
+[sse:debug] 0x00000000 anonymous
+[sse:debug] 0x00000000 anonymous
+[sse:debug] 0x00000000 anonymous
+[sse:debug] 0x00000000 anonymous
+[sse:warning] Can not resolve symbol <ERR_put_error>.
+              Will ignore the following 
+Fatal error: exception Invalid_argument("mismatched operands size")

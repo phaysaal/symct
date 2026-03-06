@@ -22,7 +22,7 @@ SRC = wrapper.c main_template.c ../../common.c \
       ../../../../common/inputs/ciphertext.c \
       ../../../../common/inputs/private_key_pem.c
 
-TARGET = ../bin/rsa_decrypt_oaep_mbedtls_32
+TARGET = ../bin/rsa_decrypt_oaep_mbedtls-O0_32
 
 .PHONY: all clean
 

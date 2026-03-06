@@ -4,7 +4,7 @@ SRC = wrapper.c main_template.c \
       ../../../../common/inputs/private_key_pem.c \
       ../../../../common/inputs/public_key_pem.c
 
-CFLAGS = -I../../../../common/inputs -I. -I../../lib -I../../lib/wolfssl -Wall -g \
+CFLAGS = -I../../../../common/inputs -I. -I../../lib -I../../lib/wolfssl -Wall -O2 -g \
          -DEXAMPLE_RSA_SIGN -DWOLFSSL_NO_SP_MATH -m32
 
 # Link statically against libwolfssl.a in ../../lib

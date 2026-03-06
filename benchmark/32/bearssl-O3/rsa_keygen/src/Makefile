@@ -1,7 +1,7 @@
 # Makefile
 CC = gcc
 CFLAGS = -I../../../../common/inputs -I../.. -I../../lib/include \
-	-Wall -O0 -g -m32 -DEXAMPLE_RSA_GENERATE_KEY -no-pie
+	-Wall -O3 -g -m32 -DEXAMPLE_RSA_GENERATE_KEY -no-pie
 
 LDFLAGS = -m32 -L../../lib -lbearssl -no-pie
 
@@ -9,7 +9,7 @@ LDFLAGS = -m32 -L../../lib -lbearssl -no-pie
 SOURCES = wrapper.c main_template.c
 
 OBJECTS = $(SOURCES:.c=.o)
-TARGET = ../bin/rsa_keygen_bearssl_32
+TARGET = ../bin/rsa_keygen_bearssl-O3_32
 
 all: $(TARGET)
 

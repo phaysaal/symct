@@ -40,6 +40,9 @@ extern "C" {
 # ifndef OPENSSL_NO_ASAN
 #  define OPENSSL_NO_ASAN
 # endif
+# ifndef OPENSSL_NO_ASM
+#  define OPENSSL_NO_ASM
+# endif
 # ifndef OPENSSL_NO_BROTLI
 #  define OPENSSL_NO_BROTLI
 # endif
@@ -93,9 +96,6 @@ extern "C" {
 # endif
 # ifndef OPENSSL_NO_KTLS
 #  define OPENSSL_NO_KTLS
-# endif
-# ifndef OPENSSL_NO_LOADERENG
-#  define OPENSSL_NO_LOADERENG
 # endif
 # ifndef OPENSSL_NO_MD2
 #  define OPENSSL_NO_MD2
@@ -154,8 +154,8 @@ extern "C" {
 # ifndef OPENSSL_NO_ZSTD_DYNAMIC
 #  define OPENSSL_NO_ZSTD_DYNAMIC
 # endif
-# ifndef OPENSSL_NO_DYNAMIC_ENGINE
-#  define OPENSSL_NO_DYNAMIC_ENGINE
+# ifndef OPENSSL_NO_STATIC_ENGINE
+#  define OPENSSL_NO_STATIC_ENGINE
 # endif
 
 

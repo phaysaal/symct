@@ -9,7 +9,7 @@ CFLAGS = -I../../../../common/inputs -I. -I../.. -I../../lib -I../../lib/wolfssl
 LDFLAGS = -no-pie -Wl,-Bstatic -L../../lib/ -lwolfssl -Wl,-Bdynamic -ldl -lm -lpthread -m32
 
 all:
-	$(CC) $(CFLAGS) $(SRC) -o ../bin/eddsa_sign_wolfssl_32 $(LDFLAGS)
+	$(CC) $(CFLAGS) $(SRC) -o ../bin/eddsa_sign_wolfssl-O0_32 $(LDFLAGS)
 
 clean:
-	rm -f ../bin/eddsa_sign_wolfssl_32
+	rm -f ../bin/eddsa_sign_wolfssl-O0_32

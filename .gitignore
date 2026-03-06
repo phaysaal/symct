@@ -1,0 +1,10 @@
+# Large log files (>50MB tend to be rejected by GitHub)
+results/32/openssl-O3/rsa_decrypt/rsa_openssl_0.log
+results/32/openssl-O3/rsa_decrypt_oaep/rsa_openssl_0.log
+results/32/openssl-O3/rsa_sign/rsa_openssl_0.log
+results/32/openssl-O0/rsa_decrypt/rsa_openssl_auto_0.log
+results/32/openssl-O0/rsa_decrypt/rsa_openssl_auto_final.log
+
+# Python
+__pycache__/
+*.pyc

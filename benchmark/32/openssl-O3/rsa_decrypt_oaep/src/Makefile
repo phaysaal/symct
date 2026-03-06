@@ -5,13 +5,13 @@ SRC = wrapper.c main_template.c \
       ../../../../common/inputs/public_key_pem.c
 
 CFLAGS = -I../../../../common/inputs -I. -I../../lib/include \
-         -L../../lib/ -Wall -O0 -g \
+         -L../../lib/ -Wall -O3 -g \
          -DEXAMPLE_RSA_DECRYPT -DOAEP -DOPENSSL_API_COMPAT=0x10100000L
 
 LDFLAGS = -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -ldl -m32
 
 all:
-	cc $(CFLAGS) $(SRC) -o ../bin/rsa_decrypt_oaep_openssl_32 $(LDFLAGS)
+	cc $(CFLAGS) $(SRC) -o ../bin/rsa_decrypt_oaep_openssl-O3_32 $(LDFLAGS)
 
 clean:
-	rm -f ../bin/rsa_decrypt_oaep_openssl_32
+	rm -f ../bin/rsa_decrypt_oaep_openssl-O3_32

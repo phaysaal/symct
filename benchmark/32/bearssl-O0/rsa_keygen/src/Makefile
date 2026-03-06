@@ -9,7 +9,7 @@ LDFLAGS = -m32 -L../../lib -lbearssl -no-pie
 SOURCES = wrapper.c main_template.c
 
 OBJECTS = $(SOURCES:.c=.o)
-TARGET = ../bin/rsa_keygen_bearssl_32
+TARGET = ../bin/rsa_keygen_bearssl-O0_32
 
 all: $(TARGET)
 

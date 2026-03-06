@@ -7,7 +7,7 @@ CFLAGS = -I../../../../common/inputs -I. -I../../lib/include \
 LDFLAGS = -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -ldl -m32
 
 all:
-	cc $(CFLAGS) $(SRC) -o ../bin/rsa_keygen_openssl_32 $(LDFLAGS)
+	cc $(CFLAGS) $(SRC) -o ../bin/rsa_keygen_openssl-O0_32 $(LDFLAGS)
 
 clean:
-	rm -f ../bin/rsa_keygen_openssl_32
+	rm -f ../bin/rsa_keygen_openssl-O0_32

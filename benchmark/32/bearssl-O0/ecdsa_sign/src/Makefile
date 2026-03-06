@@ -12,7 +12,7 @@ SOURCES = wrapper.c main_template.c \
 	../../common.c
 
 OBJECTS = $(SOURCES:.c=.o)
-TARGET = ../bin/ecdsa_sign_bearssl_32
+TARGET = ../bin/ecdsa_sign_bearssl-O0_32
 
 all: $(TARGET)
 

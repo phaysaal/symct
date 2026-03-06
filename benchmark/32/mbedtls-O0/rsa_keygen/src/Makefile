@@ -18,7 +18,7 @@ CFLAGS = -I../../../../common/inputs -I. \
 
 LDFLAGS = -L../../lib -lmbedtls -lmbedx509 -lmbedcrypto -ltfpsacrypto -ldl -lm -lpthread -m32
 
-TARGET = ../bin/rsa_keygen_mbedtls_32
+TARGET = ../bin/rsa_keygen_mbedtls-O0_32
 SRC = wrapper.c main_template.c
 
 all: $(TARGET)

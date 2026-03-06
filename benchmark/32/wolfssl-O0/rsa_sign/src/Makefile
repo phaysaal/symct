@@ -14,7 +14,7 @@ CFLAGS = -I../../../../common/inputs -I. -I../../lib -I../../lib/wolfssl -Wall -
 LDFLAGS = -no-pie -Wl,-Bstatic -L../../lib/ -lwolfssl -Wl,-Bdynamic -ldl -lm -lpthread -m32
 
 all:
-	$(CC) $(CFLAGS) $(SRC) -o ../bin/rsa_sign_wolfssl_32 $(LDFLAGS)
+	$(CC) $(CFLAGS) $(SRC) -o ../bin/rsa_sign_wolfssl-O0_32 $(LDFLAGS)
 
 clean:
-	rm -f ../bin/rsa_sign_wolfssl_32
+	rm -f ../bin/rsa_sign_wolfssl-O0_32

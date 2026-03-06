@@ -22,7 +22,7 @@ CFLAGS = -I../../../../common/inputs -I. -I../.. \
 
 LDFLAGS = -L../../lib -lmbedtls -lmbedx509 -lmbedcrypto -ltfpsacrypto -ldl -lm -lpthread -m32
 
-TARGET = ../bin/ecdsa_sign_mbedtls_32
+TARGET = ../bin/ecdsa_sign_mbedtls-O0_32
 
 all: $(TARGET)
 

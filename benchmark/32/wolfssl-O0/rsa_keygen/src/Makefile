@@ -10,7 +10,7 @@ LDFLAGS = -m32 -L../../lib -lwolfssl -no-pie -Wl,--wrap=wc_RNG_GenerateBlock
 SOURCES = wrapper.c main_template.c
 
 OBJECTS = $(SOURCES:.c=.o)
-TARGET = ../bin/rsa_keygen_wolfssl_32
+TARGET = ../bin/rsa_keygen_wolfssl-O0_32
 
 all: $(TARGET)
 
