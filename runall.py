@@ -315,7 +315,7 @@ def run_merge_reports(leaks_files, output_file):
         return False
 
 
-def run_test(test, root, timeout, memlimit, progressive=None):
+def run_test(test, root, timeout, memlimit, progressive=None, auto=True):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
         sys.executable, os.path.join(root, "runbench.py"),
@@ -329,6 +329,9 @@ def run_test(test, root, timeout, memlimit, progressive=None):
     if test["optimization"]:
         cmd += ["--optimization", test["optimization"]]
 
+    if auto:
+        cmd += ["--auto"]
+
     if progressive is not None:
         prog_dir = progressive if progressive else get_progressive_dir(test["algorithm"], test["library"])
         if prog_dir:
@@ -336,9 +339,11 @@ def run_test(test, root, timeout, memlimit, progressive=None):
 
     cmd_str = " ".join(cmd)
     start = time.time()
+    # Auto mode runs multiple iterations; allow generous subprocess timeout
+    subprocess_timeout = (timeout * 20 + 120) if auto else (timeout + 60)
 
     try:
-        result = subprocess.run(cmd, timeout=timeout + 60)
+        result = subprocess.run(cmd, timeout=subprocess_timeout)
         elapsed = time.time() - start
         return test["label"], result.returncode == 0, elapsed, cmd_str
     except subprocess.TimeoutExpired:
@@ -357,6 +362,10 @@ def main():
                         help="Directory for .leaks reports and per-library merged reports (default: reports/)")
     parser.add_argument("--progressive", type=str, nargs="?", const="", default=None,
                         help="Enable progressive mode. Optionally specify a directory override.")
+    parser.add_argument("--auto", action="store_true", default=True,
+                        help="Enable auto mode for iterative stub discovery (default: on)")
+    parser.add_argument("--no-auto", action="store_false", dest="auto",
+                        help="Disable auto mode")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
     args = parser.parse_args()
 
@@ -434,7 +443,7 @@ def main():
                 prog_info = f" [progressive={prog_dir}]"
         print(f"[{i+1}/{len(tests)}] {label}{prog_info}")
 
-        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive)
+        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto)
 
         if success:
             print(f"  -> OK ({elapsed:.0f}s)")
