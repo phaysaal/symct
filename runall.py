@@ -3,6 +3,7 @@
 """Run all available benchmark tests as a smoke test."""
 
 import argparse
+import gzip
 import os
 import re
 import subprocess
@@ -105,10 +106,17 @@ LEAK_RE = re.compile(
 
 
 def parse_leaks(log_file):
-    """Parse a binsec log file for leak lines. Returns list of (address, leak_type)."""
+    """Parse a binsec log file for leak lines. Returns list of (address, leak_type).
+
+    Handles both plain and gzip-compressed (.gz) log files.
+    """
     leaks = []
+    # Try .gz version if plain file doesn't exist
+    if not os.path.exists(log_file) and os.path.exists(log_file + ".gz"):
+        log_file = log_file + ".gz"
     try:
-        with open(log_file, 'r') as f:
+        opener = gzip.open if log_file.endswith(".gz") else open
+        with opener(log_file, 'rt') as f:
             for line in f:
                 m = LEAK_RE.search(line)
                 if m:
@@ -145,7 +153,9 @@ def print_leak_summary(tests, root, results, merged_files=None, individual_leaks
         else:
             # Check if a log file exists (ran but failed vs build failure)
             log_path = get_log_path(t, root)
-            if os.path.exists(log_path) and os.path.getsize(log_path) > 0:
+            gz_path = log_path + ".gz"
+            if (os.path.exists(log_path) and os.path.getsize(log_path) > 0) or \
+               (os.path.exists(gz_path) and os.path.getsize(gz_path) > 0):
                 completed.append(t)
             else:
                 failures.append(t)
@@ -223,16 +233,18 @@ def print_leak_summary(tests, root, results, merged_files=None, individual_leaks
     for t in tests:
         label = t["label"]
         log_path = get_log_path(t, root)
+        # Show .gz path if compressed
+        display_path = log_path + ".gz" if not os.path.exists(log_path) and os.path.exists(log_path + ".gz") else log_path
         n_leaks = test_leak_counts.get(label, 0)
-        if os.path.exists(log_path):
+        if os.path.exists(display_path):
             leaks_path = individual_leaks.get(label)
             if leaks_path:
-                print(f"  {label:40s}  log: {log_path}")
+                print(f"  {label:40s}  log: {display_path}")
                 print(f"  {'':40s}  leaks: {leaks_path}  ({n_leaks} leaks)")
             elif n_leaks > 0:
-                print(f"  {label:40s}  log: {log_path}  ({n_leaks} leaks)")
+                print(f"  {label:40s}  log: {display_path}  ({n_leaks} leaks)")
             else:
-                print(f"  {label:40s}  log: {log_path}")
+                print(f"  {label:40s}  log: {display_path}")
 
     print("=" * 62)
 
@@ -247,6 +259,20 @@ def get_binary_path(test, root, platform="32"):
         root, "benchmark", platform, library_str, algo, "bin",
         f"{algo}_{library_str}_{platform}"
     )
+
+
+def compress_log(log_file):
+    """Compress a log file with gzip in a background process. Returns the Popen object."""
+    gz_path = log_file + ".gz"
+    try:
+        proc = subprocess.Popen(
+            ["gzip", "-f", log_file],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return proc
+    except Exception as e:
+        print(f"  [WARN] gzip failed for {os.path.basename(log_file)}: {e}", file=sys.stderr)
+        return None
 
 
 def run_callstack2source(log_file, binary_path, output_file):
@@ -289,60 +315,6 @@ def run_merge_reports(leaks_files, output_file):
         return False
 
 
-def generate_reports(tests, root, results, report_dir):
-    """Generate .leaks files via callstack2source, then merge per library.
-
-    Returns:
-        dict: library -> merged leaks file path (or None if merge failed)
-        dict: test label -> individual .leaks file path
-    """
-    os.makedirs(report_dir, exist_ok=True)
-    individual_leaks = {}  # label -> leaks_file
-    leaks_by_library = defaultdict(list)  # library -> [leaks_file, ...]
-
-    print()
-    print("[REPORT] Generating source-level leak reports...")
-
-    for t, (label, success, elapsed, cmd_str) in zip(tests, results):
-        log_path = get_log_path(t, root)
-        if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
-            continue
-
-        # Only generate .leaks for logs that contain leak lines
-        leaks = parse_leaks(log_path)
-        if not leaks:
-            continue
-
-        binary_path = get_binary_path(t, root)
-        if not os.path.exists(binary_path):
-            continue
-
-        library_str = t["library"]
-        if t["optimization"]:
-            library_str = f"{t['library']}-{t['optimization']}"
-
-        leaks_file = os.path.join(
-            report_dir, f"{library_str}_{t['algorithm']}.leaks"
-        )
-
-        print(f"  {label} -> {os.path.relpath(leaks_file)}")
-        if run_callstack2source(log_path, binary_path, leaks_file):
-            individual_leaks[label] = leaks_file
-            leaks_by_library[t["library"]].append(leaks_file)
-
-    # Merge per library
-    merged_files = {}  # library -> merged_file
-    for library, files in sorted(leaks_by_library.items()):
-        if not files:
-            continue
-        merged_file = os.path.join(report_dir, f"{library}_merged.leaks")
-        print(f"  [MERGE] {library}: {len(files)} files -> {os.path.relpath(merged_file)}")
-        if run_merge_reports(files, merged_file):
-            merged_files[library] = merged_file
-
-    return merged_files, individual_leaks
-
-
 def run_test(test, root, timeout, memlimit, progressive=None):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
@@ -381,8 +353,8 @@ def main():
     parser.add_argument("--root", type=str, default=".", help="Project root directory")
     parser.add_argument("--library", type=str, action="append", default=None,
                         help="Filter by library (e.g. --library wolfssl). Comma-separated or repeated.")
-    parser.add_argument("--report", type=str, default="",
-                        help="Directory for .leaks reports and per-library merged reports")
+    parser.add_argument("--report", type=str, default="reports",
+                        help="Directory for .leaks reports and per-library merged reports (default: reports/)")
     parser.add_argument("--progressive", type=str, nargs="?", const="", default=None,
                         help="Enable progressive mode. Optionally specify a directory override.")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
@@ -419,9 +391,39 @@ def main():
             print(f"  {t['label']:40s} -> {t['nature']}{opt}{prog}")
         return
 
+    report_dir = args.report
+    if report_dir:
+        os.makedirs(report_dir, exist_ok=True)
+
     passed = 0
     failed = 0
     results = []
+    individual_leaks = {}  # label -> leaks_file
+    leaks_by_lib_opt = defaultdict(list)  # (library, opt) -> [leaks_file, ...]
+    leaks_by_library = defaultdict(list)  # library -> [leaks_file, ...]
+    compress_procs = []  # background gzip processes
+    merged_files = {}  # library -> merged_file
+
+    def get_lib_opt(test):
+        """Return (library, optimization) tuple for a test."""
+        return (test["library"], test["optimization"])
+
+    def merge_lib_opt(library, opt, files):
+        """Merge .leaks files for a (library, opt) group and print unique leak count."""
+        opt_dir = os.path.join(report_dir, opt) if opt else report_dir
+        lib_str = f"{library}-{opt}" if opt else library
+        merged_file = os.path.join(opt_dir, f"{lib_str}_merged.leaks")
+        print(f"  [MERGE] {lib_str}: {len(files)} files -> {os.path.relpath(merged_file)}")
+        if run_merge_reports(files, merged_file):
+            # Count unique leaks in merged file
+            try:
+                with open(merged_file, 'r') as f:
+                    n_unique = sum(1 for line in f if line.startswith("Leak "))
+                print(f"  [MERGE] {lib_str}: {n_unique} unique leak(s)")
+            except (OSError, IOError):
+                pass
+            return merged_file
+        return None
 
     for i, t in enumerate(tests):
         label = t["label"]
@@ -443,6 +445,47 @@ def main():
 
         results.append((label, success, elapsed, cmd_str))
 
+        # Run callstack2source and compress log right after each test
+        log_path = get_log_path(t, root)
+        if os.path.exists(log_path) and os.path.getsize(log_path) > 0:
+            leaks = parse_leaks(log_path)
+            if leaks and report_dir:
+                binary_path = get_binary_path(t, root)
+                if os.path.exists(binary_path):
+                    lib_str = t["library"]
+                    opt = t["optimization"]
+                    if opt:
+                        lib_str = f"{t['library']}-{opt}"
+                    opt_dir = os.path.join(report_dir, opt) if opt else report_dir
+                    os.makedirs(opt_dir, exist_ok=True)
+                    leaks_file = os.path.join(
+                        opt_dir, f"{lib_str}_{t['algorithm']}.leaks"
+                    )
+                    print(f"  [REPORT] {t['label']} -> {os.path.relpath(leaks_file)}")
+                    if run_callstack2source(log_path, binary_path, leaks_file):
+                        individual_leaks[t["label"]] = leaks_file
+                        leaks_by_lib_opt[get_lib_opt(t)].append(leaks_file)
+                        leaks_by_library[t["library"]].append(leaks_file)
+
+            # Compress log in background
+            proc = compress_log(log_path)
+            if proc:
+                compress_procs.append((t["label"], proc, log_path))
+
+        # Check if next test is a different (library, opt) group — merge current group
+        if report_dir:
+            next_lib_opt = get_lib_opt(tests[i + 1]) if i + 1 < len(tests) else None
+            cur_lib_opt = get_lib_opt(t)
+            if next_lib_opt != cur_lib_opt and leaks_by_lib_opt[cur_lib_opt]:
+                merge_lib_opt(t["library"], t["optimization"], leaks_by_lib_opt[cur_lib_opt])
+
+    # Wait for all background gzip processes
+    if compress_procs:
+        print("\n[COMPRESS] Waiting for log compression to finish...")
+        for label, proc, log_path in compress_procs:
+            proc.wait()
+        print(f"[COMPRESS] {len(compress_procs)} logs compressed")
+
     print("=" * 60)
     print(f"[SUMMARY] {passed} passed, {failed} failed, {len(tests)} total")
 
@@ -453,12 +496,15 @@ def main():
                 print(f"  - {label}")
                 print(f"    {cmd_str}")
 
-    merged_files = {}
-    individual_leaks = {}
-    if args.report:
-        merged_files, individual_leaks = generate_reports(
-            tests, root, results, args.report
-        )
+    # Final merge: per library across all optimizations
+    if report_dir:
+        for library, files in sorted(leaks_by_library.items()):
+            if not files:
+                continue
+            merged_file = os.path.join(report_dir, f"{library}_merged.leaks")
+            print(f"  [MERGE] {library} (all opts): {len(files)} files -> {os.path.relpath(merged_file)}")
+            if run_merge_reports(files, merged_file):
+                merged_files[library] = merged_file
 
     print_leak_summary(tests, root, results, merged_files, individual_leaks)
 
