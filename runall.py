@@ -479,6 +479,7 @@ def main():
 
         # Run callstack2source and compress logs right after each test
         log_paths = get_all_log_paths(t, root)
+        primitive_leaks_files = []  # all .leaks files for this primitive
         for log_path in log_paths:
             if log_path.endswith(".gz"):
                 continue  # already compressed from a previous run
@@ -501,6 +502,7 @@ def main():
                     )
                     print(f"  [REPORT] {t['label']} -> {os.path.relpath(leaks_file)}")
                     if run_callstack2source(log_path, binary_path, leaks_file):
+                        primitive_leaks_files.append(leaks_file)
                         individual_leaks[t["label"]] = leaks_file
                         leaks_by_lib_opt[get_lib_opt(t)].append(leaks_file)
                         leaks_by_library[t["library"]].append(leaks_file)
@@ -509,6 +511,28 @@ def main():
             proc = compress_log(log_path)
             if proc:
                 compress_procs.append((t["label"], proc, log_path))
+
+        # Compare intermediate runs vs final run for this primitive
+        if len(primitive_leaks_files) > 1 and report_dir:
+            lib_str = t["library"]
+            opt = t["optimization"]
+            if opt:
+                lib_str = f"{t['library']}-{opt}"
+            opt_dir = os.path.join(report_dir, opt) if opt else report_dir
+            intermediate_files = primitive_leaks_files[:-1]
+            final_file = primitive_leaks_files[-1]
+            merged_intermediate = os.path.join(
+                opt_dir, f"{lib_str}_{t['algorithm']}_intermediate_merged.leaks"
+            )
+            if run_merge_reports(intermediate_files, merged_intermediate):
+                try:
+                    with open(merged_intermediate, 'r') as f:
+                        n_intermediate = sum(1 for line in f if line.startswith("Leak "))
+                    with open(final_file, 'r') as f:
+                        n_final = sum(1 for line in f if line.startswith("Leak "))
+                    print(f"  [COMPARE] {t['label']}: intermediate runs {n_intermediate} unique leak(s), final run {n_final} leak(s)")
+                except (OSError, IOError):
+                    pass
 
         # Check if next test is a different (library, opt) group — merge current group
         if report_dir:
