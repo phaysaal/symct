@@ -83,7 +83,7 @@ USER artifact
 WORKDIR /home/artifact/sct
 
 # Python scripts and config
-COPY --chown=artifact:artifact runbench.py callstack2source.py merge_reports.py keylen.json runall.py ./
+COPY --chown=artifact:artifact runbench.py callstack2source.py merge_reports.py keylen.json runall.py clean_bins.sh strip_paths.sh ./
 
 # OCaml plugin source
 COPY --chown=artifact:artifact plugin/ plugin/

@@ -137,6 +137,31 @@ def get_log_path(test, root, platform="32"):
     )
 
 
+def get_all_log_paths(test, root, platform="32"):
+    """Find all log files for a test (plain _0.log and auto mode _auto_*.log).
+
+    Returns list of existing log file paths, preferring uncompressed over .gz.
+    """
+    import glob as glob_mod
+    library_str = test["library"]
+    if test["optimization"]:
+        library_str = f"{test['library']}-{test['optimization']}"
+    log_dir = os.path.join(root, "results", platform, library_str, test["algorithm"])
+    if not os.path.isdir(log_dir):
+        return []
+    nature = test["nature"]
+    paths = []
+    for pattern in [f"{nature}_0.log", f"{nature}_auto_*.log"]:
+        paths.extend(glob_mod.glob(os.path.join(log_dir, pattern)))
+    # Also check .gz versions
+    for pattern in [f"{nature}_0.log.gz", f"{nature}_auto_*.log.gz"]:
+        for gz in glob_mod.glob(os.path.join(log_dir, pattern)):
+            plain = gz[:-3]
+            if plain not in paths:
+                paths.append(gz)
+    return sorted(paths)
+
+
 def print_leak_summary(tests, root, results, merged_files=None, individual_leaks=None):
     """Parse logs and print a leak analysis summary with file paths."""
     if merged_files is None:
@@ -151,11 +176,9 @@ def print_leak_summary(tests, root, results, merged_files=None, individual_leaks
         if success:
             completed.append(t)
         else:
-            # Check if a log file exists (ran but failed vs build failure)
-            log_path = get_log_path(t, root)
-            gz_path = log_path + ".gz"
-            if (os.path.exists(log_path) and os.path.getsize(log_path) > 0) or \
-               (os.path.exists(gz_path) and os.path.getsize(gz_path) > 0):
+            # Check if any log file exists (ran but failed vs build failure)
+            log_paths = get_all_log_paths(t, root)
+            if log_paths:
                 completed.append(t)
             else:
                 failures.append(t)
@@ -174,10 +197,11 @@ def print_leak_summary(tests, root, results, merged_files=None, individual_leaks
     test_leak_counts = {}
 
     for t in completed:
-        log_path = get_log_path(t, root)
-        leaks = parse_leaks(log_path)
-        test_leak_counts[t["label"]] = len(leaks)
-        for addr, leak_type in leaks:
+        test_leaks = []
+        for log_path in get_all_log_paths(t, root):
+            test_leaks.extend(parse_leaks(log_path))
+        test_leak_counts[t["label"]] = len(test_leaks)
+        for addr, leak_type in test_leaks:
             leaks_by_library[t["library"]][leak_type] += 1
             leaks_by_algorithm[t["algorithm"]][leak_type] += 1
             total_leaks += 1
@@ -232,19 +256,18 @@ def print_leak_summary(tests, root, results, merged_files=None, individual_leaks
     print("Detailed output files:")
     for t in tests:
         label = t["label"]
-        log_path = get_log_path(t, root)
-        # Show .gz path if compressed
-        display_path = log_path + ".gz" if not os.path.exists(log_path) and os.path.exists(log_path + ".gz") else log_path
+        log_paths = get_all_log_paths(t, root)
         n_leaks = test_leak_counts.get(label, 0)
-        if os.path.exists(display_path):
+        if log_paths:
             leaks_path = individual_leaks.get(label)
+            log_display = log_paths[0] if len(log_paths) == 1 else f"{log_paths[0]} (+{len(log_paths)-1} more)"
             if leaks_path:
-                print(f"  {label:40s}  log: {display_path}")
+                print(f"  {label:40s}  log: {log_display}")
                 print(f"  {'':40s}  leaks: {leaks_path}  ({n_leaks} leaks)")
             elif n_leaks > 0:
-                print(f"  {label:40s}  log: {display_path}  ({n_leaks} leaks)")
+                print(f"  {label:40s}  log: {log_display}  ({n_leaks} leaks)")
             else:
-                print(f"  {label:40s}  log: {display_path}")
+                print(f"  {label:40s}  log: {log_display}")
 
     print("=" * 62)
 
@@ -454,9 +477,13 @@ def main():
 
         results.append((label, success, elapsed, cmd_str))
 
-        # Run callstack2source and compress log right after each test
-        log_path = get_log_path(t, root)
-        if os.path.exists(log_path) and os.path.getsize(log_path) > 0:
+        # Run callstack2source and compress logs right after each test
+        log_paths = get_all_log_paths(t, root)
+        for log_path in log_paths:
+            if log_path.endswith(".gz"):
+                continue  # already compressed from a previous run
+            if os.path.getsize(log_path) == 0:
+                continue
             leaks = parse_leaks(log_path)
             if leaks and report_dir:
                 binary_path = get_binary_path(t, root)
@@ -467,8 +494,10 @@ def main():
                         lib_str = f"{t['library']}-{opt}"
                     opt_dir = os.path.join(report_dir, opt) if opt else report_dir
                     os.makedirs(opt_dir, exist_ok=True)
+                    # Use log basename to distinguish auto iterations
+                    log_base = os.path.splitext(os.path.basename(log_path))[0]
                     leaks_file = os.path.join(
-                        opt_dir, f"{lib_str}_{t['algorithm']}.leaks"
+                        opt_dir, f"{lib_str}_{t['algorithm']}_{log_base}.leaks"
                     )
                     print(f"  [REPORT] {t['label']} -> {os.path.relpath(leaks_file)}")
                     if run_callstack2source(log_path, binary_path, leaks_file):
