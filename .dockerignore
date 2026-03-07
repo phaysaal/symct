@@ -7,6 +7,8 @@
 !merge_reports.py
 !runall.py
 !keylen.json
+!clean_bins.sh
+!strip_paths.sh
 
 # ---- OCaml plugin (source only) ----
 !plugin/
