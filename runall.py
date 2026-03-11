@@ -3,6 +3,7 @@
 """Run all available benchmark tests as a smoke test."""
 
 import argparse
+import glob as glob_mod
 import gzip
 import os
 import re
@@ -137,16 +138,20 @@ def get_log_path(test, root, platform="32"):
     )
 
 
+def get_log_dir(test, root, platform="32"):
+    """Return the log directory for a test."""
+    library_str = test["library"]
+    if test["optimization"]:
+        library_str = f"{test['library']}-{test['optimization']}"
+    return os.path.join(root, "results", platform, library_str, test["algorithm"])
+
+
 def get_all_log_paths(test, root, platform="32"):
     """Find all log files for a test (plain _0.log and auto mode _auto_*.log).
 
     Returns list of existing log file paths, preferring uncompressed over .gz.
     """
-    import glob as glob_mod
-    library_str = test["library"]
-    if test["optimization"]:
-        library_str = f"{test['library']}-{test['optimization']}"
-    log_dir = os.path.join(root, "results", platform, library_str, test["algorithm"])
+    log_dir = get_log_dir(test, root, platform)
     if not os.path.isdir(log_dir):
         return []
     nature = test["nature"]
@@ -160,6 +165,75 @@ def get_all_log_paths(test, root, platform="32"):
             if plain not in paths:
                 paths.append(gz)
     return sorted(paths)
+
+
+def categorize_logs(test, root, platform="32"):
+    """Categorize log files for a test into auto mode phases.
+
+    Returns dict with keys:
+        'no_stub': path to auto_0 log (initial run, no stubs)
+        'stub_iterations': list of auto_1..auto_N logs (stub iterations)
+        'last_stub': path to last stub iteration log (auto_N)
+        'final': path to auto_final log (final run, no stubs, extended timeout)
+        'plain': path to non-auto _0.log (if not using auto mode)
+    All values are None/[] if not found.
+    """
+    log_dir = get_log_dir(test, root, platform)
+    nature = test["nature"]
+    result = {'no_stub': None, 'stub_iterations': [], 'last_stub': None, 'final': None, 'plain': None}
+
+    if not os.path.isdir(log_dir):
+        return result
+
+    def find(pattern):
+        """Find log file, checking plain then .gz."""
+        matches = glob_mod.glob(os.path.join(log_dir, pattern))
+        if matches:
+            return sorted(matches)
+        # Try .gz
+        gz_matches = glob_mod.glob(os.path.join(log_dir, pattern + ".gz"))
+        return sorted(gz_matches) if gz_matches else []
+
+    # Plain (non-auto) log
+    plain = find(f"{nature}_0.log")
+    if plain:
+        result['plain'] = plain[0]
+
+    # Auto mode logs
+    auto_0 = find(f"{nature}_auto_0.log")
+    if auto_0:
+        result['no_stub'] = auto_0[0]
+
+    # Stub iterations: auto_1, auto_2, ...
+    all_auto = find(f"{nature}_auto_[0-9]*.log")
+    # Filter out auto_0 — those are no-stub
+    stub_iters = []
+    for p in all_auto:
+        base = os.path.basename(p).replace('.gz', '')
+        # Extract iteration number from <nature>_auto_<N>.log
+        m = re.search(r'_auto_(\d+)\.log', base)
+        if m and int(m.group(1)) > 0:
+            stub_iters.append(p)
+    stub_iters.sort()
+    result['stub_iterations'] = stub_iters
+    if stub_iters:
+        result['last_stub'] = stub_iters[-1]
+
+    # Final run
+    final = find(f"{nature}_auto_final.log")
+    if final:
+        result['final'] = final[0]
+
+    return result
+
+
+def count_leaks_in_file(leaks_file):
+    """Count 'Leak ' lines in a .leaks report file."""
+    try:
+        with open(leaks_file, 'r') as f:
+            return sum(1 for line in f if line.startswith("Leak "))
+    except (OSError, IOError):
+        return 0
 
 
 def print_leak_summary(tests, root, results, merged_files=None, individual_leaks=None):
@@ -338,6 +412,61 @@ def run_merge_reports(leaks_files, output_file):
         return False
 
 
+def print_leak_tables(table_data, tests):
+    """Print a per-library table with rows=primitives, columns=opt x phase."""
+    all_libraries = sorted(set(t["library"] for t in tests))
+    all_algorithms = sorted(set(t["algorithm"] for t in tests))
+    all_opts = sorted(set(t["optimization"] for t in tests if t["optimization"]))
+    if not all_opts:
+        all_opts = [""]
+
+    phases = [('no_stub', 'No Stub'), ('combined', 'Combined'), ('last_stub', 'Last Stub'), ('final', 'Final')]
+
+    for library in all_libraries:
+        # Check if this library has any data
+        lib_algos = sorted(set(algo for (lib, algo) in table_data if lib == library))
+        if not lib_algos:
+            continue
+
+        # Build column headers
+        col_headers = []
+        for opt in all_opts:
+            opt_label = opt if opt else "default"
+            for _, phase_label in phases:
+                col_headers.append(f"{opt_label}-{phase_label}")
+
+        # Determine column widths
+        algo_width = max(len(a) for a in lib_algos)
+        algo_width = max(algo_width, len("Algorithm"))
+        col_width = max(len(h) for h in col_headers)
+        col_width = max(col_width, 4)
+
+        print()
+        print("=" * 62)
+        print(f"LEAK TABLE: {library}")
+        print("=" * 62)
+
+        # Header row
+        header = f"{'Algorithm':<{algo_width}}"
+        for h in col_headers:
+            header += f"  {h:>{col_width}}"
+        print(header)
+        print("-" * len(header))
+
+        # Data rows
+        for algo in lib_algos:
+            row = f"{algo:<{algo_width}}"
+            for opt in all_opts:
+                for phase_key, _ in phases:
+                    val = table_data.get((library, algo), {}).get((opt, phase_key))
+                    cell = str(val) if val is not None else "-"
+                    row += f"  {cell:>{col_width}}"
+            print(row)
+
+        print("-" * len(header))
+        print()
+
+
 def run_test(test, root, timeout, memlimit, progressive=None, auto=True):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
@@ -436,6 +565,10 @@ def main():
     compress_procs = []  # background gzip processes
     merged_files = {}  # library -> merged_file
 
+    # table_data[(library, algorithm)][(opt, phase)] = unique leak count
+    # phases: 'no_stub', 'combined', 'last_stub', 'final'
+    table_data = defaultdict(dict)
+
     def get_lib_opt(test):
         """Return (library, optimization) tuple for a test."""
         return (test["library"], test["optimization"])
@@ -447,14 +580,51 @@ def main():
         merged_file = os.path.join(opt_dir, f"{lib_str}_merged.leaks")
         print(f"  [MERGE] {lib_str}: {len(files)} files -> {os.path.relpath(merged_file)}")
         if run_merge_reports(files, merged_file):
-            # Count unique leaks in merged file
-            try:
-                with open(merged_file, 'r') as f:
-                    n_unique = sum(1 for line in f if line.startswith("Leak "))
-                print(f"  [MERGE] {lib_str}: {n_unique} unique leak(s)")
-            except (OSError, IOError):
-                pass
+            n_unique = count_leaks_in_file(merged_file)
+            print(f"  [MERGE] {lib_str}: {n_unique} unique leak(s)")
             return merged_file
+        return None
+
+    def make_leaks_file(log_path, test, suffix=""):
+        """Run callstack2source on a log and return the .leaks path, or None."""
+        if not log_path or not os.path.exists(log_path):
+            return None
+        if os.path.getsize(log_path) == 0 if not log_path.endswith(".gz") else False:
+            return None
+        leaks = parse_leaks(log_path)
+        if not leaks:
+            return None
+        binary_path = get_binary_path(test, root)
+        if not os.path.exists(binary_path):
+            return None
+        lib_str = test["library"]
+        opt = test["optimization"]
+        if opt:
+            lib_str = f"{test['library']}-{opt}"
+        opt_dir = os.path.join(report_dir, opt) if opt else report_dir
+        os.makedirs(opt_dir, exist_ok=True)
+        log_base = os.path.splitext(os.path.basename(log_path))[0]
+        if log_base.endswith(".log"):
+            log_base = log_base[:-4]  # strip extra .log from .log.gz
+        leaks_file = os.path.join(
+            opt_dir, f"{lib_str}_{test['algorithm']}_{log_base}{suffix}.leaks"
+        )
+        print(f"  [REPORT] {test['label']} -> {os.path.relpath(leaks_file)}")
+        if run_callstack2source(log_path, binary_path, leaks_file):
+            return leaks_file
+        return None
+
+    def merge_and_count(files, output_path):
+        """Merge .leaks files and return unique leak count. Returns count or None."""
+        if not files:
+            return None
+        if len(files) == 1:
+            # Single file: just merge (dedup within it) and count
+            if run_merge_reports(files, output_path):
+                return count_leaks_in_file(output_path)
+            return None
+        if run_merge_reports(files, output_path):
+            return count_leaks_in_file(output_path)
         return None
 
     for i, t in enumerate(tests):
@@ -477,69 +647,94 @@ def main():
 
         results.append((label, success, elapsed, cmd_str))
 
-        # Run callstack2source and compress logs right after each test
-        log_paths = get_all_log_paths(t, root)
-        primitive_leaks_files = []  # all .leaks files for this primitive
-        for log_path in log_paths:
-            if log_path.endswith(".gz"):
-                continue  # already compressed from a previous run
-            if os.path.getsize(log_path) == 0:
-                continue
-            leaks = parse_leaks(log_path)
-            if leaks and report_dir:
-                binary_path = get_binary_path(t, root)
-                if os.path.exists(binary_path):
-                    lib_str = t["library"]
-                    opt = t["optimization"]
-                    if opt:
-                        lib_str = f"{t['library']}-{opt}"
-                    opt_dir = os.path.join(report_dir, opt) if opt else report_dir
-                    os.makedirs(opt_dir, exist_ok=True)
-                    # Use log basename to distinguish auto iterations
-                    log_base = os.path.splitext(os.path.basename(log_path))[0]
-                    leaks_file = os.path.join(
-                        opt_dir, f"{lib_str}_{t['algorithm']}_{log_base}.leaks"
-                    )
-                    print(f"  [REPORT] {t['label']} -> {os.path.relpath(leaks_file)}")
-                    if run_callstack2source(log_path, binary_path, leaks_file):
-                        primitive_leaks_files.append(leaks_file)
-                        individual_leaks[t["label"]] = leaks_file
-                        leaks_by_lib_opt[get_lib_opt(t)].append(leaks_file)
-                        leaks_by_library[t["library"]].append(leaks_file)
+        if not report_dir:
+            continue
 
-            # Compress log in background
+        # Categorize logs and generate .leaks files per phase
+        cats = categorize_logs(t, root)
+        lib_str = t["library"]
+        opt = t["optimization"]
+        if opt:
+            lib_str = f"{t['library']}-{opt}"
+        opt_dir = os.path.join(report_dir, opt) if opt else report_dir
+        os.makedirs(opt_dir, exist_ok=True)
+
+        all_leaks_files = []  # all .leaks for this primitive
+
+        # 1. No Stub (auto_0): generate .leaks, merge (dedup), count
+        no_stub_leaks = make_leaks_file(cats['no_stub'], t)
+        if no_stub_leaks:
+            merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_no_stub_merged.leaks")
+            n = merge_and_count([no_stub_leaks], merged_path)
+            if n is not None:
+                table_data[(t["library"], t["algorithm"])][(opt, 'no_stub')] = n
+                print(f"  [NO STUB] {n} unique leak(s)")
+            all_leaks_files.append(no_stub_leaks)
+
+        # 2. Stub iterations (auto_1..auto_N): generate .leaks for each
+        stub_leaks_files = []
+        for log_path in cats['stub_iterations']:
+            lf = make_leaks_file(log_path, t)
+            if lf:
+                stub_leaks_files.append(lf)
+                all_leaks_files.append(lf)
+
+        # 3. Last stub (auto_N): count from last stub .leaks
+        if stub_leaks_files:
+            last_stub_file = stub_leaks_files[-1]
+            merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_last_stub_merged.leaks")
+            n = merge_and_count([last_stub_file], merged_path)
+            if n is not None:
+                table_data[(t["library"], t["algorithm"])][(opt, 'last_stub')] = n
+                print(f"  [LAST STUB] {n} unique leak(s)")
+
+        # 4. Combined (all stub iterations merged)
+        if stub_leaks_files:
+            merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_combined_merged.leaks")
+            n = merge_and_count(stub_leaks_files, merged_path)
+            if n is not None:
+                table_data[(t["library"], t["algorithm"])][(opt, 'combined')] = n
+                print(f"  [COMBINED] {n} unique leak(s)")
+
+        # 5. Final run (auto_final): generate .leaks, merge (dedup), count
+        final_leaks = make_leaks_file(cats['final'], t)
+        if final_leaks:
+            merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_final_merged.leaks")
+            n = merge_and_count([final_leaks], merged_path)
+            if n is not None:
+                table_data[(t["library"], t["algorithm"])][(opt, 'final')] = n
+                print(f"  [FINAL] {n} unique leak(s)")
+            all_leaks_files.append(final_leaks)
+
+        # Also handle plain (non-auto) log if present and no auto logs found
+        if not cats['no_stub'] and not cats['final'] and cats['plain']:
+            plain_leaks = make_leaks_file(cats['plain'], t)
+            if plain_leaks:
+                merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_plain_merged.leaks")
+                n = merge_and_count([plain_leaks], merged_path)
+                if n is not None:
+                    table_data[(t["library"], t["algorithm"])][(opt, 'no_stub')] = n
+                all_leaks_files.append(plain_leaks)
+
+        # Track for per-library merges
+        if all_leaks_files:
+            individual_leaks[t["label"]] = all_leaks_files[-1]
+            leaks_by_lib_opt[get_lib_opt(t)].extend(all_leaks_files)
+            leaks_by_library[t["library"]].extend(all_leaks_files)
+
+        # Compress all log files in background
+        for log_path in get_all_log_paths(t, root):
+            if log_path.endswith(".gz"):
+                continue
             proc = compress_log(log_path)
             if proc:
                 compress_procs.append((t["label"], proc, log_path))
 
-        # Compare intermediate runs vs final run for this primitive
-        if len(primitive_leaks_files) > 1 and report_dir:
-            lib_str = t["library"]
-            opt = t["optimization"]
-            if opt:
-                lib_str = f"{t['library']}-{opt}"
-            opt_dir = os.path.join(report_dir, opt) if opt else report_dir
-            intermediate_files = primitive_leaks_files[:-1]
-            final_file = primitive_leaks_files[-1]
-            merged_intermediate = os.path.join(
-                opt_dir, f"{lib_str}_{t['algorithm']}_intermediate_merged.leaks"
-            )
-            if run_merge_reports(intermediate_files, merged_intermediate):
-                try:
-                    with open(merged_intermediate, 'r') as f:
-                        n_intermediate = sum(1 for line in f if line.startswith("Leak "))
-                    with open(final_file, 'r') as f:
-                        n_final = sum(1 for line in f if line.startswith("Leak "))
-                    print(f"  [COMPARE] {t['label']}: intermediate runs {n_intermediate} unique leak(s), final run {n_final} leak(s)")
-                except (OSError, IOError):
-                    pass
-
         # Check if next test is a different (library, opt) group — merge current group
-        if report_dir:
-            next_lib_opt = get_lib_opt(tests[i + 1]) if i + 1 < len(tests) else None
-            cur_lib_opt = get_lib_opt(t)
-            if next_lib_opt != cur_lib_opt and leaks_by_lib_opt[cur_lib_opt]:
-                merge_lib_opt(t["library"], t["optimization"], leaks_by_lib_opt[cur_lib_opt])
+        next_lib_opt = get_lib_opt(tests[i + 1]) if i + 1 < len(tests) else None
+        cur_lib_opt = get_lib_opt(t)
+        if next_lib_opt != cur_lib_opt and leaks_by_lib_opt[cur_lib_opt]:
+            merge_lib_opt(t["library"], t["optimization"], leaks_by_lib_opt[cur_lib_opt])
 
     # Wait for all background gzip processes
     if compress_procs:
@@ -569,6 +764,10 @@ def main():
                 merged_files[library] = merged_file
 
     print_leak_summary(tests, root, results, merged_files, individual_leaks)
+
+    # Print per-library leak tables
+    if table_data:
+        print_leak_tables(table_data, tests)
 
     if failed > 0:
         sys.exit(1)
