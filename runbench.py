@@ -73,6 +73,8 @@ def parse_args():
     parser.add_argument("--build", action="store_true", help="Build the benchmark before running")
     parser.add_argument("--memlimit", type=int, default=16384, help="Memory limit in MB (default: 16384 = 16GB, 0 = unlimited)")
     parser.add_argument("--auto", action="store_true", help="Auto mode: iteratively discover and add bignum stubs")
+    parser.add_argument("--group", type=int, default=0, help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
+    parser.add_argument("--clean", action="store_true", help="Delete existing results and reports for this primitive before running")
 
     return parser.parse_args()
 
@@ -309,8 +311,130 @@ FUNC_ANNOTATION_RE = re.compile(r'#\s*<([a-zA-Z0-9_]+)>')
 AUTO_LEAK_RE = re.compile(
     r'\[checkct:result\]\s+Instruction\s+0x[0-9a-fA-F]+\s+has\s+.+?\s+leak'
 )
+AUTO_LEAK_ADDR_RE = re.compile(
+    r'\[checkct:result\]\s+Instruction\s+(0x[0-9a-fA-F]+)\s+has\s+(.+?\s+leak)'
+)
 REPLACE_DIRECTIVE_RE = re.compile(r'replace\s+<([a-zA-Z0-9_]+)>')
 POPBV_SIZE_RE = re.compile(r'popBV\s+\w+<(\d+)>')
+HOOK_AT_RE = re.compile(r'hook at <([a-zA-Z0-9_]+)>')
+
+
+def count_leaks_in_log(log_file):
+    """Count leak lines in a binsec log file (handles .gz)."""
+    import gzip as _gzip
+    if not os.path.exists(log_file) and os.path.exists(log_file + ".gz"):
+        log_file = log_file + ".gz"
+    count = 0
+    try:
+        opener = _gzip.open if log_file.endswith(".gz") else open
+        with opener(log_file, 'rt') as f:
+            for line in f:
+                if AUTO_LEAK_RE.search(line):
+                    count += 1
+    except (OSError, IOError):
+        pass
+    return count
+
+
+def get_hooked_bn_functions(log_file, library):
+    """Extract unique BN function names that were actually hooked in a binsec log."""
+    import gzip as _gzip
+    hooked = set()
+    # Try .gz version if plain file doesn't exist
+    if not os.path.exists(log_file) and os.path.exists(log_file + ".gz"):
+        log_file = log_file + ".gz"
+    try:
+        opener = _gzip.open if log_file.endswith(".gz") else open
+        with opener(log_file, 'rt') as f:
+            for line in f:
+                m = HOOK_AT_RE.search(line)
+                if m:
+                    func = m.group(1)
+                    if is_bn_function(func, library):
+                        hooked.add(func)
+    except (OSError, IOError):
+        pass
+    return hooked
+
+
+def count_stubbed_functions(stub_files):
+    """Count total number of functions replaced by a set of stub .ini files."""
+    funcs = set()
+    for fpath in stub_files:
+        try:
+            with open(fpath) as f:
+                funcs.update(REPLACE_DIRECTIVE_RE.findall(f.read()))
+        except (OSError, IOError):
+            pass
+    return len(funcs)
+
+
+def get_unique_leak_addrs(log_file):
+    """Extract unique (address, leak_type) pairs from a binsec log file (handles .gz)."""
+    import gzip as _gzip
+    if not os.path.exists(log_file) and os.path.exists(log_file + ".gz"):
+        log_file = log_file + ".gz"
+    addrs = set()
+    try:
+        opener = _gzip.open if log_file.endswith(".gz") else open
+        with opener(log_file, 'rt') as f:
+            for line in f:
+                m = AUTO_LEAK_ADDR_RE.search(line)
+                if m:
+                    addrs.add((m.group(1), m.group(2).strip()))
+    except (OSError, IOError):
+        pass
+    return addrs
+
+
+def generate_leaks_file(log_file, binary_path, output_leaks):
+    """Run callstack2source on a log file to produce a .leaks file.
+
+    Returns True on success, False on failure.
+    """
+    callstack2source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "callstack2source.py")
+    try:
+        r = subprocess.run(
+            [sys.executable, callstack2source, log_file, binary_path, output_leaks],
+            capture_output=True, text=True, timeout=120
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def count_unique_in_leaks(leaks_files):
+    """Run merge_reports --uniq-source on .leaks files and return unique count.
+
+    Returns unique source-level alert count, or None on failure.
+    """
+    merge_reports_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "merge_reports.py")
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.merged', delete=False, mode='w') as tmp:
+            tmp_path = tmp.name
+        valid_files = [f for f in leaks_files if os.path.exists(f) and os.path.getsize(f) > 0]
+        if not valid_files:
+            return 0
+        r = subprocess.run(
+            [sys.executable, merge_reports_script, '--uniq-source', '-o', tmp_path] + valid_files,
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode != 0:
+            return None
+        count = 0
+        with open(tmp_path, 'r') as f:
+            for line in f:
+                if re.match(r'^UNIQUE #\d+', line):
+                    count += 1
+        return count
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def is_bn_function(func_name, library):
@@ -431,76 +555,49 @@ def parse_log_for_auto(log_file, library):
     return func_line_counts, leak_call_chains, dict(call_graph)
 
 
-def find_target_bn_functions(func_line_counts, leak_call_chains, library, threshold=0.75):
+def find_target_bn_functions(func_line_counts, library, leak_bn_funcs=None, cumulative_threshold=0.75):
     """Determine which BN functions need stubs.
 
-    Combines:
-    1. All BN functions found in leak call chains
-    2. BN functions that collectively account for >threshold of analysis lines
-    """
-    # Collect all BN functions from leak call chains
-    target_funcs = set()
-    for chain in leak_call_chains:
-        for func in chain:
-            if is_bn_function(func, library):
-                target_funcs.add(func)
+    1. Sort all functions by line count descending.
+    2. Take the shortest prefix whose cumulative share crosses cumulative_threshold.
+    3. Filter to BN functions only.
+    4. Always include any BN function that has a leak, regardless of share.
 
+    Returns set of BN function names to target for stubbing.
+    """
     total_lines = sum(func_line_counts.values())
     if total_lines == 0:
-        return target_funcs
+        return set()
 
-    bn_counts = {f: c for f, c in func_line_counts.items() if is_bn_function(f, library)}
-    bn_total = sum(bn_counts.values())
+    sorted_funcs = sorted(func_line_counts.items(), key=lambda x: -x[1])
 
-    if bn_total / total_lines > threshold:
-        target_funcs.update(bn_counts.keys())
+    target_funcs = set()
+    cumulative = 0.0
+    for func, count in sorted_funcs:
+        if cumulative / total_lines >= cumulative_threshold:
+            break
+        cumulative += count
+        if is_bn_function(func, library):
+            target_funcs.add(func)
+
+    # Always include leaking BN functions
+    if leak_bn_funcs:
+        target_funcs.update(leak_bn_funcs)
 
     return target_funcs
 
 
-def resolve_leak_stubs(leak_call_chains, func_to_file, library):
-    """Walk each leak call chain (deepest first) and find the first BN function with a stub.
+def resolve_stubs_via_callers(target_funcs, func_to_file, call_graph, library):
+    """For each target BN function, find a stub — either directly or via callers.
+
+    For functions that have a stub file directly, use that.
+    For functions without a stub, walk up the call graph to find the closest
+    caller (BN function) that has a stub file.
 
     Returns:
-        set of function names to stub for leaks
-        list of (chain, resolved_func_or_None) for reporting
+        resolved: dict of func -> stub_file (includes both direct and caller stubs)
+        resolutions: list of (func, resolved_via, caller_chain) for reporting
     """
-    funcs_to_stub = set()
-    resolutions = []
-
-    for chain in leak_call_chains:
-        resolved = None
-        for func in chain:  # deepest first
-            if is_bn_function(func, library) and func in func_to_file:
-                resolved = func
-                funcs_to_stub.add(func)
-                break
-        resolutions.append((chain, resolved))
-
-    return funcs_to_stub, resolutions
-
-
-def resolve_dominant_via_callers(func_line_counts, call_graph, func_to_file, library, threshold=0.05):
-    """For dominant BN functions without stubs, walk up the call graph to find
-    the closest caller that has a stub.
-
-    A function is considered dominant if it accounts for >threshold of total lines.
-
-    Returns:
-        extra_funcs: set of caller function names to stub
-        resolutions: list of (dominant_func, lines, caller_chain, resolved_func_or_None)
-    """
-    total_lines = sum(func_line_counts.values())
-    if total_lines == 0:
-        return set(), []
-
-    # Find dominant BN functions without stubs
-    dominant = []
-    for func, count in func_line_counts.items():
-        if count / total_lines > threshold and is_bn_function(func, library) and func not in func_to_file:
-            dominant.append((func, count))
-    dominant.sort(key=lambda x: -x[1])
-
     # Build reverse call graph: callee -> [(caller, count)]
     reverse_graph = {}
     for caller, callees in call_graph.items():
@@ -509,36 +606,41 @@ def resolve_dominant_via_callers(func_line_counts, call_graph, func_to_file, lib
                 reverse_graph[callee] = []
             reverse_graph[callee].append((caller, count))
 
-    extra_funcs = set()
+    resolved = {}
     resolutions = []
 
-    for func, lines in dominant:
-        # BFS up the call graph, following the most frequent caller first
-        visited = set()
-        resolved = None
-        caller_chain = [func]
-        current = func
+    for func in sorted(target_funcs):
+        if func in func_to_file:
+            # Direct stub exists
+            resolved[func] = func_to_file[func]
+            resolutions.append((func, func, [func]))
+        else:
+            # Walk up call graph to find a caller with a stub
+            visited = set()
+            caller_chain = [func]
+            current = func
+            found = None
 
-        for _ in range(10):  # max depth
-            callers = reverse_graph.get(current, [])
-            # Filter to BN callers, sort by transition count (most frequent first)
-            bn_callers = [(c, n) for c, n in callers if is_bn_function(c, library) and c not in visited]
-            if not bn_callers:
-                break
-            bn_callers.sort(key=lambda x: -x[1])
-            best_caller = bn_callers[0][0]
-            visited.add(best_caller)
-            caller_chain.append(best_caller)
+            for _ in range(10):  # max depth
+                callers = reverse_graph.get(current, [])
+                # Filter to BN callers, sort by transition count (most frequent first)
+                bn_callers = [(c, n) for c, n in callers if is_bn_function(c, library) and c not in visited]
+                if not bn_callers:
+                    break
+                bn_callers.sort(key=lambda x: -x[1])
+                best_caller = bn_callers[0][0]
+                visited.add(best_caller)
+                caller_chain.append(best_caller)
 
-            if best_caller in func_to_file:
-                resolved = best_caller
-                extra_funcs.add(best_caller)
-                break
-            current = best_caller
+                if best_caller in func_to_file:
+                    found = best_caller
+                    resolved[best_caller] = func_to_file[best_caller]
+                    break
+                current = best_caller
 
-        resolutions.append((func, lines, caller_chain, resolved))
+            resolutions.append((func, found, caller_chain))
 
-    return extra_funcs, resolutions
+    return resolved, resolutions
 
 
 def find_stub_files_for_auto(binsec_root, library, platform, target_funcs, keylen=0):
@@ -586,6 +688,50 @@ def find_stub_files_for_auto(binsec_root, library, platform, target_funcs, keyle
                     func_to_file[func] = fpath
 
     return func_to_file
+
+
+def find_all_keylen_stubs(binsec_root, library, platform, keylen=0):
+    """Find ALL .ini stub files for a library that are keylen-compatible.
+
+    Deduplicates files that replace the same set of functions — only the
+    first file found (alphabetical walk order) is kept per unique function set.
+
+    Returns set of file paths.
+    """
+    lib_dir = os.path.join(binsec_root, platform, library)
+    if not os.path.isdir(lib_dir):
+        return set()
+
+    stub_files = set()
+    seen_func_sets = {}  # frozenset of replaced funcs -> first file path
+    for dirpath, dirnames, filenames in sorted(os.walk(lib_dir)):
+        if os.path.basename(dirpath) == "random":
+            dirnames.clear()
+            continue
+        for fname in sorted(filenames):
+            if not fname.endswith('.ini'):
+                continue
+            fpath = os.path.join(dirpath, fname)
+            try:
+                with open(fpath) as f:
+                    content = f.read()
+            except (OSError, IOError):
+                continue
+            # Must have at least one replace directive
+            replaced_funcs = frozenset(REPLACE_DIRECTIVE_RE.findall(content))
+            if not replaced_funcs:
+                continue
+            # Check keylen compatibility
+            if keylen > 0:
+                popbv_sizes = set(int(s) for s in POPBV_SIZE_RE.findall(content))
+                if popbv_sizes and keylen not in popbv_sizes:
+                    continue
+            # Deduplicate: keep first file per unique function set
+            if replaced_funcs not in seen_func_sets:
+                seen_func_sets[replaced_funcs] = fpath
+                stub_files.add(fpath)
+
+    return stub_files
 
 
 def auto_test(args):
@@ -659,20 +805,46 @@ def auto_test(args):
     output_path = f"{args.root}/results/{args.platform}/{library_str}/{algorithm}"
     os.makedirs(output_path, exist_ok=True)
 
+    # Clean existing results and reports if requested
+    if args.clean:
+        import glob as _glob
+        # Clean result logs
+        for f in _glob.glob(os.path.join(output_path, "*")):
+            os.remove(f)
+            print(f"[CLEAN] Removed {os.path.relpath(f, args.root)}")
+        # Clean report .leaks files
+        if args.report:
+            report_base = args.report
+        else:
+            report_base = os.path.join(args.root, "reports")
+        if args.optimization:
+            report_dir = os.path.join(report_base, args.optimization)
+        else:
+            report_dir = report_base
+        if os.path.isdir(report_dir):
+            pattern = os.path.join(report_dir, f"{library_str}_{algorithm}*")
+            for f in _glob.glob(pattern):
+                os.remove(f)
+                print(f"[CLEAN] Removed {os.path.relpath(f, args.root)}")
+
     # Auto mode iteration loop
     accumulated_stubs = set()  # file paths discovered so far
     iteration = 0
     success = True
+    iteration_stats = []  # list of dicts: {iteration, phase, alerts, unique_alerts, stubs, log_file}
+    iteration_leaks_files = []  # .leaks file paths per iteration (for progressive merge)
 
     while True:
         print(f"\n{'='*60}")
         print(f"[AUTO] Iteration {iteration}")
         print(f"{'='*60}")
 
+        is_keygen = "keygen" in algorithm
+
         if iteration == 0:
-            # First run: no bn, no stubs
-            use_bn = ""
-            use_base_stubs = ""
+            # First run: no bn, no stubs (except keygen always uses bn)
+            use_bn = bn_option if is_keygen else ""
+            use_base_stubs = base_stubs if is_keygen else ""
             auto_scripts = ""
         else:
             use_bn = bn_option
@@ -710,6 +882,36 @@ def auto_test(args):
 
         # Parse the log
         func_counts, leak_call_chains, call_graph = parse_log_for_auto(log_file, args.library)
+        n_alerts = count_leaks_in_log(log_file)
+
+        # Generate .leaks and count unique source-level alerts
+        leaks_path = log_file.replace('.log', '.leaks')
+        n_unique = 0
+        if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+            n = count_unique_in_leaks([leaks_path])
+            if n is not None:
+                n_unique = n
+            iteration_leaks_files.append(leaks_path)
+        elif n_alerts > 0:
+            n_unique = len(get_unique_leak_addrs(log_file))  # fallback
+
+        phase_name = "no_stub" if iteration == 0 else f"stub_{iteration}"
+        hooked_bn = get_hooked_bn_functions(log_file, args.library)
+        iteration_stats.append({
+            "iteration": iteration,
+            "phase": phase_name,
+            "alerts": n_alerts,
+            "unique_alerts": n_unique,
+            "stubs": count_stubbed_functions(accumulated_stubs),
+            "hooked_bn": len(hooked_bn),
+            "hooked_bn_funcs": sorted(hooked_bn),
+            "log_file": os.path.relpath(log_file, args.root),
+        })
+
+        if hooked_bn:
+            print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
+            for f in sorted(hooked_bn):
+                print(f"    {f}")
 
         total_lines = sum(func_counts.values())
         bn_counts = {f: c for f, c in func_counts.items() if is_bn_function(f, args.library)}
@@ -736,116 +938,119 @@ def auto_test(args):
         print(f"  BN function lines  : {bn_lines} ({100*bn_lines/total_lines:.1f}%)")
         print(f"  Other lines        : {total_lines - bn_lines} ({100*(total_lines - bn_lines)/total_lines:.1f}%)")
 
-        # Top BN functions by line count
-        if bn_counts:
+        # Top functions by cumulative share (75% of trace)
+        sorted_all = sorted(func_counts.items(), key=lambda x: -x[1])
+        cumulative = 0.0
+        print()
+        print(f"  Top functions (75% cumulative share):")
+        top_count = 0
+        for f, c in sorted_all:
+            if cumulative / total_lines >= 0.75:
+                break
+            cumulative += c
+            pct = 100 * c / total_lines
+            cum_pct = 100 * cumulative / total_lines
+            bn_mark = " [BN]" if is_bn_function(f, args.library) else ""
+            leak_mark = " *** LEAK" if f in leak_bn_funcs else ""
+            print(f"    {f:40s} {c:8d}  ({pct:5.1f}%)  cum {cum_pct:5.1f}%{bn_mark}{leak_mark}")
+            top_count += 1
+        remaining = len(func_counts) - top_count
+        if remaining > 0:
+            print(f"    ... and {remaining} more functions in remaining {100 - 100*cumulative/total_lines:.1f}%")
+
+        # Find target BN functions (top cumulative share + any leaking BN)
+        target_funcs = find_target_bn_functions(func_counts, args.library, leak_bn_funcs)
+
+        if target_funcs:
             print()
-            print(f"  Top BN functions (by traced lines):")
-            for f, c in sorted(bn_counts.items(), key=lambda x: -x[1])[:15]:
+            print(f"  BN stub targets ({len(target_funcs)} from above):")
+            for f in sorted(target_funcs, key=lambda x: -func_counts.get(x, 0)):
+                c = func_counts.get(f, 0)
                 pct = 100 * c / total_lines
                 leak_mark = " *** LEAK" if f in leak_bn_funcs else ""
                 print(f"    {f:40s} {c:8d}  ({pct:5.1f}%){leak_mark}")
-            if len(bn_counts) > 15:
-                print(f"    ... and {len(bn_counts) - 15} more")
 
-        # Top non-BN functions
-        if non_bn_counts:
-            print()
-            print(f"  Top non-BN functions:")
-            for f, c in sorted(non_bn_counts.items(), key=lambda x: -x[1])[:10]:
-                pct = 100 * c / total_lines
-                print(f"    {f:40s} {c:8d}  ({pct:5.1f}%)")
-            if len(non_bn_counts) > 10:
-                print(f"    ... and {len(non_bn_counts) - 10} more")
-
-        # Leak call chain summary
-        if leak_call_chains:
-            chains_with_bn = [c for c in leak_call_chains if any(is_bn_function(f, args.library) for f in c)]
-            print()
-            print(f"  Leak call chains: {len(leak_call_chains)} total, {len(chains_with_bn)} with BN functions")
-            if leak_bn_funcs:
-                print(f"  BN functions in leak chains:")
-                for f in sorted(leak_bn_funcs):
-                    c = func_counts.get(f, 0)
-                    print(f"    {f:40s} {c:8d} lines")
-
-        # Find target BN functions (includes all BN funcs from chains + dominant ones)
-        target_funcs = find_target_bn_functions(func_counts, leak_call_chains, args.library)
-
-        bn_dominant = bn_lines / total_lines > 0.75
+        bn_dominant = bn_lines / total_lines > 0.50
         print()
-        print(f"  BN dominance (>75%): {'YES' if bn_dominant else 'NO'} ({100*bn_lines/total_lines:.1f}%)")
+        print(f"  BN dominance (>50%): {'YES' if bn_dominant else 'NO'} ({100*bn_lines/total_lines:.1f}%)")
 
         if not target_funcs:
             print(f"  No bignum functions to stub.")
             print(f"  {'─'*56}")
             break
 
-        # Find stub files for target functions
-        func_to_file = find_stub_files_for_auto(script_root, args.library, args.platform, target_funcs, resolved_keylen)
+        # Find stub files for ALL BN functions in the trace (not just targets)
+        # so that call graph walks can discover caller stubs
+        all_bn_funcs = {f for f in func_counts if is_bn_function(f, args.library)}
+        func_to_file = find_stub_files_for_auto(script_root, args.library, args.platform, all_bn_funcs, resolved_keylen)
 
-        # Resolve leak call chains: walk deepest-first, pick first BN func with a stub
-        leak_stub_funcs, resolutions = resolve_leak_stubs(leak_call_chains, func_to_file, args.library)
+        # Resolve stubs: direct match or walk up call graph to find caller with stub
+        resolved, resolutions = resolve_stubs_via_callers(target_funcs, func_to_file, call_graph, args.library)
 
-        # Show call chain resolution details
+        # Show resolution details
         if resolutions:
-            resolved_count = sum(1 for _, r in resolutions if r is not None)
+            direct = sum(1 for f, via, chain in resolutions if via == f)
+            via_caller = sum(1 for f, via, chain in resolutions if via and via != f)
+            unresolved = sum(1 for f, via, chain in resolutions if via is None)
             print()
-            print(f"  Leak chain resolution: {resolved_count}/{len(resolutions)} resolved to stubs")
-            for chain, resolved in resolutions:
-                if not chain:
-                    continue
-                chain_str = " -> ".join(chain[:5])
-                if len(chain) > 5:
-                    chain_str += f" -> ... ({len(chain)} total)"
-                if resolved:
-                    print(f"    [{resolved}] <- {chain_str}")
-                else:
-                    print(f"    [NO STUB] <- {chain_str}")
-
-        # Resolve dominant functions without stubs via call graph
-        dominant_extra, dominant_resolutions = resolve_dominant_via_callers(
-            func_counts, call_graph, func_to_file, args.library
-        )
-
-        if dominant_resolutions:
-            print()
-            print(f"  Dominant function caller resolution:")
-            for func, lines, caller_chain, resolved in dominant_resolutions:
-                pct = 100 * lines / total_lines
-                chain_str = " -> ".join(caller_chain)
-                if resolved:
-                    print(f"    {func} ({pct:.1f}%) -> stub caller: {resolved}")
+            print(f"  Stub resolution: {direct} direct, {via_caller} via caller, {unresolved} unresolved")
+            for func, via, chain in resolutions:
+                pct = 100 * func_counts.get(func, 0) / total_lines
+                if via == func:
+                    print(f"    {func:40s} ({pct:5.1f}%) -> DIRECT stub")
+                elif via:
+                    chain_str = " -> ".join(chain)
+                    print(f"    {func:40s} ({pct:5.1f}%) -> via {via}")
                     print(f"      chain: {chain_str}")
                 else:
-                    print(f"    {func} ({pct:.1f}%) -> NO CALLER STUB")
-                    print(f"      chain: {chain_str}")
+                    print(f"    {func:40s} ({pct:5.1f}%) -> NO STUB")
 
-        # Add caller stubs for dominant functions to func_to_file
-        if dominant_extra:
-            # These are functions that already have stubs but weren't in the
-            # original target set. Search for their stub files.
-            extra_to_file = find_stub_files_for_auto(
-                script_root, args.library, args.platform, dominant_extra, resolved_keylen
-            )
-            func_to_file.update(extra_to_file)
+        # Merge resolved stubs into func_to_file (caller stubs found by graph walk)
+        for func_name, stub_file in resolved.items():
+            if func_name not in func_to_file:
+                func_to_file[func_name] = stub_file
 
         # Determine new files not yet accumulated
-        new_files = set(func_to_file.values()) - accumulated_stubs
+        all_new_files = set(func_to_file.values()) - accumulated_stubs
         covered_funcs = set(func_to_file.keys())
-        missing = target_funcs - covered_funcs - dominant_extra
+        missing = target_funcs - covered_funcs
 
-        # Functions to be stubbed next
+        # Rank new files by total trace share of the functions they replace
+        def file_trace_share(fpath):
+            funcs = [f for f, fp in func_to_file.items() if fp == fpath]
+            return sum(func_counts.get(f, 0) for f in funcs)
+
+        ranked_new = sorted(all_new_files, key=file_trace_share, reverse=True)
+
+        # Apply --group limit: pick top K new files per iteration
+        if args.group > 0 and len(ranked_new) > args.group:
+            new_files = set(ranked_new[:args.group])
+            deferred = set(ranked_new[args.group:])
+        else:
+            new_files = set(ranked_new)
+            deferred = set()
+
+        # Functions to be stubbed next (only from selected new_files)
         next_funcs = {f for f, fp in func_to_file.items() if fp in new_files}
 
         print()
         if next_funcs:
             print(f"  Functions to stub NEXT ({len(next_funcs)}):")
-            for f in sorted(next_funcs):
+            for f in sorted(next_funcs, key=lambda x: -func_counts.get(x, 0)):
                 fpath = func_to_file[f]
                 c = func_counts.get(f, 0)
-                leak_mark = " [LEAK]" if f in leak_stub_funcs else ""
-                caller_mark = " [CALLER]" if f in dominant_extra else ""
-                print(f"    {f:40s} -> {os.path.basename(fpath)}{leak_mark}{caller_mark}")
+                via_mark = ""
+                for orig, via, chain in resolutions:
+                    if via == f and orig != f:
+                        via_mark = f" [CALLER of {orig}]"
+                        break
+                print(f"    {f:40s} -> {os.path.basename(fpath)}{via_mark}")
+
+        if deferred:
+            deferred_funcs = {f for f, fp in func_to_file.items() if fp in deferred}
+            print(f"  Deferred to next iteration ({len(deferred_funcs)}):")
+            for f in sorted(deferred_funcs, key=lambda x: -func_counts.get(x, 0)):
+                print(f"    {f:40s} -> {os.path.basename(func_to_file[f])}")
 
         # Already-stubbed functions (from previous iterations)
         already_stubbed = {f for f, fp in func_to_file.items() if fp in accumulated_stubs}
@@ -863,8 +1068,9 @@ def auto_test(args):
             break
 
         # Summary of new files being added
-        print(f"\n[AUTO] Adding {len(new_files)} new stub files:")
-        for fpath in sorted(new_files):
+        group_label = f" (group {args.group}, {len(all_new_files)} available)" if args.group > 0 else ""
+        print(f"\n[AUTO] Adding {len(new_files)} new stub files{group_label}:")
+        for fpath in sorted(new_files, key=file_trace_share, reverse=True):
             covered = [f for f, fp in func_to_file.items() if fp == fpath]
             print(f"  + {os.path.relpath(fpath, args.root)} (replaces: {', '.join(sorted(covered))})")
 
@@ -878,23 +1084,90 @@ def auto_test(args):
         for sf in sorted(accumulated_stubs):
             print(f"  {os.path.relpath(sf, args.root)}")
 
-    # Final run: same config as iteration 0 (no bn, no stubs) with
-    # total timeout = per-iteration timeout * number of iterations
-    final_timeout = args.timeout * total_iterations
+    is_keygen = "keygen" in algorithm
+
+    # ── All-stubs run: use every keylen-compatible stub file ──
+    all_stubs = find_all_keylen_stubs(script_root, args.library, args.platform, resolved_keylen)
+    new_all_stubs = all_stubs - accumulated_stubs
 
     print(f"\n{'='*60}")
-    print(f"[AUTO] Final run (no BN, no stubs, timeout={final_timeout}s)")
+    print(f"[AUTO] All-stubs run ({len(all_stubs)} stub files, {len(new_all_stubs)} new)")
+    print(f"{'='*60}")
+
+    if new_all_stubs:
+        print(f"  Additional stubs beyond progressive:")
+        for sf in sorted(new_all_stubs):
+            print(f"    + {os.path.relpath(sf, args.root)}")
+
+    all_stubs_scripts = ("," + ",".join(sorted(all_stubs))) if all_stubs else ""
+    script_files = (
+        f"{base_root_ini},{script_root}{args.platform}/mem.ini"
+        f"{random_file}{gs_path}{extra}{base_stubs}{all_stubs_scripts}"
+    )
+
+    log_file = f"{output_path}/{nature}_auto_allstubs{tag}.log"
+
+    run_cmd = (
+        f"binsec -sse -checkct {bn_option}-sse-missing-symbol warn -sse-script {script_files} "
+        f"-sse-debug-level {dbg} -sse-depth 1000000000 "
+        f"-fml-solver-timeout 600 -sse-timeout {args.timeout} {binary_path} "
+        f"-smt-solver bitwuzla:smtlib"
+    )
+
+    parts = run_cmd.split()
+    if parts:
+        program = parts[0]
+        run_args = parts[1:]
+
+        print(f"[CASE] auto allstubs")
+        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+            success = False
+        n_alerts = count_leaks_in_log(log_file)
+        leaks_path = log_file.replace('.log', '.leaks')
+        n_unique = 0
+        if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+            n = count_unique_in_leaks([leaks_path])
+            if n is not None:
+                n_unique = n
+            iteration_leaks_files.append(leaks_path)
+        elif n_alerts > 0:
+            n_unique = len(get_unique_leak_addrs(log_file))
+        hooked_bn = get_hooked_bn_functions(log_file, args.library)
+        iteration_stats.append({
+            "iteration": "allstubs",
+            "phase": "allstubs",
+            "alerts": n_alerts,
+            "unique_alerts": n_unique,
+            "stubs": count_stubbed_functions(all_stubs),
+            "hooked_bn": len(hooked_bn),
+            "hooked_bn_funcs": sorted(hooked_bn),
+            "log_file": os.path.relpath(log_file, args.root),
+        })
+        if hooked_bn:
+            print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
+            for f in sorted(hooked_bn):
+                print(f"    {f}")
+
+    # ── Final run: no stubs, extended timeout ──
+    # For keygen, keep bn enabled (same as iteration 0)
+    final_timeout = args.timeout * (total_iterations + 1)  # +1 for allstubs run
+    final_bn = bn_option if is_keygen else ""
+    final_base_stubs = base_stubs if is_keygen else ""
+
+    bn_label = "with BN" if is_keygen else "no BN"
+    print(f"\n{'='*60}")
+    print(f"[AUTO] Final run ({bn_label}, no extra stubs, timeout={final_timeout}s)")
     print(f"{'='*60}")
 
     script_files = (
         f"{base_root_ini},{script_root}{args.platform}/mem.ini"
-        f"{random_file}{gs_path}{extra}"
+        f"{random_file}{gs_path}{extra}{final_base_stubs}"
     )
 
     log_file = f"{output_path}/{nature}_auto_final{tag}.log"
 
     run_cmd = (
-        f"binsec -sse -checkct -sse-missing-symbol warn -sse-script {script_files} "
+        f"binsec -sse -checkct {final_bn}-sse-missing-symbol warn -sse-script {script_files} "
         f"-sse-debug-level {dbg} -sse-depth 1000000000 "
         f"-fml-solver-timeout 600 -sse-timeout {final_timeout} {binary_path} "
         f"-smt-solver bitwuzla:smtlib"
@@ -908,6 +1181,85 @@ def auto_test(args):
         print(f"[CASE] auto final")
         if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
             success = False
+        n_alerts = count_leaks_in_log(log_file)
+        leaks_path = log_file.replace('.log', '.leaks')
+        n_unique = 0
+        final_leaks_file = None
+        if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+            n = count_unique_in_leaks([leaks_path])
+            if n is not None:
+                n_unique = n
+            final_leaks_file = leaks_path
+        elif n_alerts > 0:
+            n_unique = len(get_unique_leak_addrs(log_file))
+        hooked_bn = get_hooked_bn_functions(log_file, args.library)
+        iteration_stats.append({
+            "iteration": "final",
+            "phase": "final",
+            "alerts": n_alerts,
+            "unique_alerts": n_unique,
+            "stubs": 0,
+            "hooked_bn": len(hooked_bn),
+            "hooked_bn_funcs": sorted(hooked_bn),
+            "log_file": os.path.relpath(log_file, args.root),
+        })
+        if hooked_bn:
+            print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
+            for f in sorted(hooked_bn):
+                print(f"    {f}")
+
+    # ── Compute merged unique alert counts via merge_reports ──
+    # Per-phase: use the individual iteration stats (already computed)
+    no_stub_count = iteration_stats[0]["unique_alerts"] if iteration_stats else 0
+    allstubs_count = next((s["unique_alerts"] for s in iteration_stats if s["phase"] == "allstubs"), 0)
+    final_count = next((s["unique_alerts"] for s in iteration_stats if s["phase"] == "final"), 0)
+
+    # Progressive: merge all non-final .leaks files together
+    progressive_count = count_unique_in_leaks(iteration_leaks_files)
+    if progressive_count is None:
+        # Fallback: sum individual uniques (overcount but better than 0)
+        progressive_count = sum(s["unique_alerts"] for s in iteration_stats if s["phase"] != "final")
+
+    merged_counts = {
+        "no_stub": no_stub_count,
+        "allstubs": allstubs_count,
+        "progressive": progressive_count,
+        "final": final_count,
+    }
+
+    # ── Summary statistics ──
+    print(f"\n{'='*60}")
+    print(f"[AUTO] Summary")
+    print(f"{'='*60}")
+    print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}")
+    print(f"  {'-'*58}")
+    for s in iteration_stats:
+        print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}")
+    print(f"  {'-'*58}")
+    print(f"  {'No Stub (iter 0)':<20s} {'':<8s} {merged_counts['no_stub']:>8d}")
+    print(f"  {'All Stubs':<20s} {'':<8s} {merged_counts['allstubs']:>8d}")
+    print(f"  {'Progressive (all)':<20s} {'':<8s} {merged_counts['progressive']:>8d}")
+    print(f"  {'Final':<20s} {'':<8s} {merged_counts['final']:>8d}")
+
+    # ── Write JSON results ──
+    json_data = {
+        "library": args.library,
+        "primitive": algorithm,
+        "optimization": args.optimization or "",
+        "nature": nature,
+        "platform": args.platform,
+        "timeout": args.timeout,
+        "keylen": resolved_keylen,
+        "iterations": iteration_stats,
+        "unique_alerts": merged_counts,
+    }
+    json_file = os.path.join(
+        output_path,
+        f"{nature}_{library_str}_{algorithm}{tag}.json"
+    )
+    with open(json_file, 'w') as jf:
+        json.dump(json_data, jf, indent=2)
+    print(f"\n[AUTO] Results written to {os.path.relpath(json_file, args.root)}")
 
     return success
 

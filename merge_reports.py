@@ -88,6 +88,32 @@ def parse_report(path):
         i += 1
 
 
+def extract_leak_site(hierarchy_lines):
+    """
+    Extract the bottom-most leak site (file + line) from hierarchy lines.
+    The leak site is the first line containing '<-- ... leak'.
+    Returns a normalised string of just function + source location, or the
+    first line if no leak marker is found.
+    """
+    for line in hierarchy_lines:
+        if '<--' in line and 'leak' in line:
+            # Strip address prefix
+            line = re.sub(r'\[0x[0-9a-fA-F]+\]\s*', '', line)
+            # Strip hit counts
+            line = re.sub(r'\s*\[\d+ hits\]', '', line)
+            # Strip leak annotation to keep just func (file:line)
+            line = re.sub(r'\s*<--.*$', '', line)
+            # Strip leading whitespace and tree characters
+            line = re.sub(r'^[\s└─│├]+', '', line).strip()
+            return line
+    # Fallback: first non-empty line
+    for line in hierarchy_lines:
+        stripped = line.strip()
+        if stripped:
+            return re.sub(r'\[0x[0-9a-fA-F]+\]\s*', '', stripped).rstrip()
+    return ""
+
+
 def normalize_hierarchy(hierarchy_lines, uniq_source=False):
     """
     Normalise hierarchy lines for comparison:
@@ -126,7 +152,7 @@ def normalize_hierarchy(hierarchy_lines, uniq_source=False):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python merge_reports.py <report1> [report2 ...] [-o output_file] [--uniq-source]")
+        print("Usage: python merge_reports.py <report1> [report2 ...] [-o output_file] [--uniq-source] [--callstack]")
         print()
         print("Reads callstack2source report files and outputs the unique")
         print("call stacks across all files.")
@@ -136,12 +162,15 @@ def main():
         print("  --uniq-source   Compare only source-level call chains, stripping")
         print("                  unresolved '??' nodes, violation marker lines, and")
         print("                  ignoring leak type differences")
+        print("  --callstack     Compare alerts by full call stack (default: only")
+        print("                  by leak site, i.e. bottom-most file+line)")
         sys.exit(1)
 
     # Parse arguments
     report_files = []
     output_file = None
     uniq_source = False
+    use_callstack = False
     i = 1
     while i < len(sys.argv):
         if sys.argv[i] == '-o' and i + 1 < len(sys.argv):
@@ -149,6 +178,9 @@ def main():
             i += 2
         elif sys.argv[i] == '--uniq-source':
             uniq_source = True
+            i += 1
+        elif sys.argv[i] == '--callstack':
+            use_callstack = True
             i += 1
         else:
             report_files.append(sys.argv[i])
@@ -171,9 +203,14 @@ def main():
         files_processed += 1
         for leak_type, hierarchy in parse_report(path):
             total_violations += 1
-            norm = normalize_hierarchy(hierarchy, uniq_source)
-            # When --uniq-source, ignore leak type for uniqueness
-            sig = (leak_type, norm) # (norm,) if uniq_source else 
+            if use_callstack:
+                # Compare by full normalised call stack
+                norm = normalize_hierarchy(hierarchy, uniq_source)
+                sig = (leak_type, norm)
+            else:
+                # Compare by leak site only (bottom-most file+line)
+                site = extract_leak_site(hierarchy)
+                sig = (leak_type, site)
             if sig not in seen:
                 seen.add(sig)
                 unique_entries.append((leak_type, hierarchy))

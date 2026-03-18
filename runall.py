@@ -5,6 +5,7 @@
 import argparse
 import glob as glob_mod
 import gzip
+import json
 import os
 import re
 import subprocess
@@ -127,6 +128,32 @@ def parse_leaks(log_file):
     return leaks
 
 
+def count_log_lines(path):
+    """Count lines in a log file (handles .gz)."""
+    try:
+        if path.endswith(".gz"):
+            with gzip.open(path, 'rt', errors='replace') as f:
+                return sum(1 for _ in f)
+        else:
+            with open(path, 'r', errors='replace') as f:
+                return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+
+def has_complete_logs(test, root, platform="32", min_lines=1000):
+    """Check if a test already has complete auto-mode logs (auto_0 + auto_final, each >min_lines)."""
+    cats = categorize_logs(test, root, platform)
+    # Need at least auto_0 and auto_final
+    if not cats['no_stub'] or not cats['final']:
+        return False
+    if count_log_lines(cats['no_stub']) < min_lines:
+        return False
+    if count_log_lines(cats['final']) < min_lines:
+        return False
+    return True
+
+
 def get_log_path(test, root, platform="32"):
     """Construct the expected log file path for a test."""
     library_str = test["library"]
@@ -174,13 +201,14 @@ def categorize_logs(test, root, platform="32"):
         'no_stub': path to auto_0 log (initial run, no stubs)
         'stub_iterations': list of auto_1..auto_N logs (stub iterations)
         'last_stub': path to last stub iteration log (auto_N)
+        'allstubs': path to auto_allstubs log (all keylen-compatible stubs)
         'final': path to auto_final log (final run, no stubs, extended timeout)
         'plain': path to non-auto _0.log (if not using auto mode)
     All values are None/[] if not found.
     """
     log_dir = get_log_dir(test, root, platform)
     nature = test["nature"]
-    result = {'no_stub': None, 'stub_iterations': [], 'last_stub': None, 'final': None, 'plain': None}
+    result = {'no_stub': None, 'stub_iterations': [], 'last_stub': None, 'allstubs': None, 'final': None, 'plain': None}
 
     if not os.path.isdir(log_dir):
         return result
@@ -219,6 +247,11 @@ def categorize_logs(test, root, platform="32"):
     if stub_iters:
         result['last_stub'] = stub_iters[-1]
 
+    # All-stubs run
+    allstubs = find(f"{nature}_auto_allstubs.log")
+    if allstubs:
+        result['allstubs'] = allstubs[0]
+
     # Final run
     final = find(f"{nature}_auto_final.log")
     if final:
@@ -228,10 +261,14 @@ def categorize_logs(test, root, platform="32"):
 
 
 def count_leaks_in_file(leaks_file):
-    """Count 'Leak ' lines in a .leaks report file."""
+    """Count unique entries in a .leaks report file.
+
+    Handles both raw callstack2source output (VIOLATION #N) and
+    merge_reports output (UNIQUE #N).
+    """
     try:
         with open(leaks_file, 'r') as f:
-            return sum(1 for line in f if line.startswith("Leak "))
+            return sum(1 for line in f if re.match(r'^(VIOLATION|UNIQUE) #\d+', line))
     except (OSError, IOError):
         return 0
 
@@ -420,7 +457,7 @@ def print_leak_tables(table_data, tests):
     if not all_opts:
         all_opts = [""]
 
-    phases = [('no_stub', 'No Stub'), ('combined', 'Combined'), ('last_stub', 'Last Stub'), ('final', 'Final')]
+    phases = [('no_stub', 'No Stub'), ('progressive', 'Progressive'), ('all_stub', 'All Stub'), ('allstubs', 'All Stubs'), ('final', 'Final')]
 
     for library in all_libraries:
         # Check if this library has any data
@@ -467,7 +504,138 @@ def print_leak_tables(table_data, tests):
         print()
 
 
-def run_test(test, root, timeout, memlimit, progressive=None, auto=True):
+def load_json_result(test, root, platform="32"):
+    """Load the JSON result file for a test, if it exists."""
+    library_str = test["library"]
+    if test["optimization"]:
+        library_str = f"{test['library']}-{test['optimization']}"
+    json_dir = os.path.join(root, "results", platform, library_str, test["algorithm"])
+    if not os.path.isdir(json_dir):
+        return None
+    # Find the .json file
+    for f in os.listdir(json_dir):
+        if f.endswith('.json'):
+            try:
+                with open(os.path.join(json_dir, f)) as jf:
+                    return json.load(jf)
+            except (json.JSONDecodeError, OSError):
+                pass
+    return None
+
+
+def print_stub_tables(tests, root):
+    """Print a per-library stub table with rows=primitives, columns=opt x phase.
+
+    Reads stub counts from JSON result files produced by runbench.py.
+    """
+    all_libraries = sorted(set(t["library"] for t in tests))
+    all_opts = sorted(set(t["optimization"] for t in tests if t["optimization"]))
+    if not all_opts:
+        all_opts = [""]
+
+    # Collect stub data from JSON files
+    # stub_data[(library, algo)][(opt, phase)] = stub_count
+    # hook_data[(library, algo)][(opt, phase)] = hooked_bn_count
+    stub_data = defaultdict(dict)
+    hook_data = defaultdict(dict)
+    has_data = False
+
+    for t in tests:
+        jdata = load_json_result(t, root)
+        if not jdata:
+            continue
+        lib = t["library"]
+        algo = t["algorithm"]
+        opt = t["optimization"]
+        for it in jdata.get("iterations", []):
+            phase = it.get("phase", "")
+            stubs = it.get("stubs", 0)
+            hooked_bn = it.get("hooked_bn", 0)
+            stub_data[(lib, algo)][(opt, phase)] = stubs
+            hook_data[(lib, algo)][(opt, phase)] = hooked_bn
+            if stubs > 0 or hooked_bn > 0:
+                has_data = True
+
+    if not has_data:
+        return
+
+    phases = [('no_stub', 'No Stub'), ('allstubs', 'All Stubs'), ('final', 'Final')]
+    # Also include stub_N phases dynamically
+    all_phases_seen = set()
+    for key_dict in stub_data.values():
+        for (opt, phase) in key_dict:
+            all_phases_seen.add(phase)
+
+    # Build ordered phase list: no_stub, stub_1, stub_2, ..., allstubs, final
+    stub_phases = sorted([p for p in all_phases_seen if p.startswith("stub_")],
+                         key=lambda x: int(x.split("_")[1]))
+    phases = [('no_stub', 'No Stub')]
+    for sp in stub_phases:
+        phases.append((sp, sp.replace("_", " ").title()))
+    phases.append(('allstubs', 'All Stubs'))
+    phases.append(('final', 'Final'))
+
+    for library in all_libraries:
+        lib_algos = sorted(set(algo for (lib, algo) in stub_data if lib == library))
+        if not lib_algos:
+            continue
+
+        col_headers = []
+        for opt in all_opts:
+            opt_label = opt if opt else "default"
+            for _, phase_label in phases:
+                col_headers.append(f"{opt_label}-{phase_label}")
+
+        algo_width = max(len(a) for a in lib_algos)
+        algo_width = max(algo_width, len("Algorithm"))
+        col_width = max(len(h) for h in col_headers)
+        col_width = max(col_width, 4)
+
+        print()
+        print("=" * 62)
+        print(f"STUB TABLE: {library}  (functions stubbed)")
+        print("=" * 62)
+
+        header = f"{'Algorithm':<{algo_width}}"
+        for h in col_headers:
+            header += f"  {h:>{col_width}}"
+        print(header)
+        print("-" * len(header))
+
+        for algo in lib_algos:
+            row = f"{algo:<{algo_width}}"
+            for opt in all_opts:
+                for phase_key, _ in phases:
+                    val = stub_data.get((library, algo), {}).get((opt, phase_key))
+                    cell = str(val) if val is not None else "-"
+                    row += f"  {cell:>{col_width}}"
+            print(row)
+
+        print("-" * len(header))
+        print()
+
+        # BN Hook table
+        print("=" * 62)
+        print(f"BN HOOK TABLE: {library}  (BN functions actually applied)")
+        print("=" * 62)
+
+        print(header.replace("Algorithm", "Algorithm"))  # reuse same header
+        print("-" * len(header))
+
+        for algo in lib_algos:
+            row = f"{algo:<{algo_width}}"
+            for opt in all_opts:
+                for phase_key, _ in phases:
+                    val = hook_data.get((library, algo), {}).get((opt, phase_key))
+                    cell = str(val) if val is not None else "-"
+                    row += f"  {cell:>{col_width}}"
+            print(row)
+
+        print("-" * len(header))
+        print()
+
+
+def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
         sys.executable, os.path.join(root, "runbench.py"),
@@ -484,6 +652,9 @@ def run_test(test, root, timeout, memlimit, progressive=None, auto=True):
     if auto:
         cmd += ["--auto"]
 
+    if group > 0:
+        cmd += ["--group", str(group)]
+
     if progressive is not None:
         prog_dir = progressive if progressive else get_progressive_dir(test["algorithm"], test["library"])
         if prog_dir:
@@ -494,8 +665,11 @@ def run_test(test, root, timeout, memlimit, progressive=None, auto=True):
     # Auto mode runs multiple iterations; allow generous subprocess timeout
     subprocess_timeout = (timeout * 20 + 120) if auto else (timeout + 60)
 
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
     try:
-        result = subprocess.run(cmd, timeout=subprocess_timeout)
+        result = subprocess.run(cmd, timeout=subprocess_timeout, env=env)
         elapsed = time.time() - start
         return test["label"], result.returncode == 0, elapsed, cmd_str
     except subprocess.TimeoutExpired:
@@ -510,6 +684,8 @@ def main():
     parser.add_argument("--root", type=str, default=".", help="Project root directory")
     parser.add_argument("--library", type=str, action="append", default=None,
                         help="Filter by library (e.g. --library wolfssl). Comma-separated or repeated.")
+    parser.add_argument("--optimization", type=str, action="append", default=None,
+                        help="Filter by optimization (e.g. --optimization O0). Comma-separated or repeated.")
     parser.add_argument("--report", type=str, default="reports",
                         help="Directory for .leaks reports and per-library merged reports (default: reports/)")
     parser.add_argument("--progressive", type=str, nargs="?", const="", default=None,
@@ -518,7 +694,11 @@ def main():
                         help="Enable auto mode for iterative stub discovery (default: on)")
     parser.add_argument("--no-auto", action="store_false", dest="auto",
                         help="Disable auto mode")
+    parser.add_argument("--group", type=int, default=0,
+                        help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
+    parser.add_argument("--missing", action="store_true",
+                        help="Skip tests whose result logs already exist and have >1000 lines; reuse existing logs for reporting")
     args = parser.parse_args()
 
     root = os.path.abspath(args.root)
@@ -533,6 +713,15 @@ def main():
                 if lib:
                     allowed.add(lib)
         tests = [t for t in tests if t["library"] in allowed]
+
+    if args.optimization:
+        allowed_opts = set()
+        for item in args.optimization:
+            for opt in item.split(","):
+                opt = opt.strip()
+                if opt:
+                    allowed_opts.add(opt)
+        tests = [t for t in tests if t["optimization"] in allowed_opts]
 
     if not tests:
         print("[ERROR] No tests found", file=sys.stderr)
@@ -556,6 +745,7 @@ def main():
     if report_dir:
         os.makedirs(report_dir, exist_ok=True)
 
+    wall_start = time.time()
     passed = 0
     failed = 0
     results = []
@@ -566,7 +756,7 @@ def main():
     merged_files = {}  # library -> merged_file
 
     # table_data[(library, algorithm)][(opt, phase)] = unique leak count
-    # phases: 'no_stub', 'combined', 'last_stub', 'final'
+    # phases: 'no_stub', 'progressive', 'all_stub', 'allstubs', 'final'
     table_data = defaultdict(dict)
 
     def get_lib_opt(test):
@@ -627,7 +817,13 @@ def main():
             return count_leaks_in_file(output_path)
         return None
 
+    skipped = 0
+    last_lib = None
     for i, t in enumerate(tests):
+        cur_lib = f"{t['library']}-{t['optimization']}" if t["optimization"] else t["library"]
+        if cur_lib != last_lib:
+            print(f"\n{'─'*60}\n  {cur_lib}\n{'─'*60}")
+            last_lib = cur_lib
         label = t["label"]
         prog_info = ""
         if args.progressive is not None:
@@ -636,16 +832,23 @@ def main():
                 prog_info = f" [progressive={prog_dir}]"
         print(f"[{i+1}/{len(tests)}] {label}{prog_info}")
 
-        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto)
-
-        if success:
-            print(f"  -> OK ({elapsed:.0f}s)")
+        # --missing: skip if complete logs already exist
+        if args.missing and has_complete_logs(t, root):
+            print(f"  -> SKIP (logs already exist)")
+            skipped += 1
             passed += 1
+            results.append((label, True, 0, "skipped"))
         else:
-            print(f"  -> FAIL ({elapsed:.0f}s)")
-            failed += 1
+            label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group)
 
-        results.append((label, success, elapsed, cmd_str))
+            if success:
+                print(f"  -> OK ({elapsed:.0f}s)")
+                passed += 1
+            else:
+                print(f"  -> FAIL ({elapsed:.0f}s)")
+                failed += 1
+
+            results.append((label, success, elapsed, cmd_str))
 
         if not report_dir:
             continue
@@ -670,8 +873,14 @@ def main():
                 table_data[(t["library"], t["algorithm"])][(opt, 'no_stub')] = n
                 print(f"  [NO STUB] {n} unique leak(s)")
             all_leaks_files.append(no_stub_leaks)
+        elif cats['no_stub']:
+            # Log exists but make_leaks_file failed — use raw count
+            raw = len(parse_leaks(cats['no_stub']))
+            table_data[(t["library"], t["algorithm"])][(opt, 'no_stub')] = raw
+            if raw > 0:
+                print(f"  [NO STUB] {raw} leak(s) (raw, .leaks generation failed)")
 
-        # 2. Stub iterations (auto_1..auto_N): generate .leaks for each
+        # 2. Stub iterations (auto_1..auto_N-1): generate .leaks for each
         stub_leaks_files = []
         for log_path in cats['stub_iterations']:
             lf = make_leaks_file(log_path, t)
@@ -679,24 +888,63 @@ def main():
                 stub_leaks_files.append(lf)
                 all_leaks_files.append(lf)
 
-        # 3. Last stub (auto_N): count from last stub .leaks
-        if stub_leaks_files:
-            last_stub_file = stub_leaks_files[-1]
-            merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_last_stub_merged.leaks")
-            n = merge_and_count([last_stub_file], merged_path)
-            if n is not None:
-                table_data[(t["library"], t["algorithm"])][(opt, 'last_stub')] = n
-                print(f"  [LAST STUB] {n} unique leak(s)")
+        # 3. All Stub (auto_N-1, last stub iteration with all accumulated stubs)
+        if cats['last_stub']:
+            last_leaks = parse_leaks(cats['last_stub'])
+            n_last = len(last_leaks)
+            table_data[(t["library"], t["algorithm"])][(opt, 'all_stub')] = n_last
+            print(f"  [ALL STUB] {n_last} leak(s) (raw)")
+            # If there's a .leaks file for it, use merge-dedup count
+            if stub_leaks_files:
+                last_stub_file = stub_leaks_files[-1]
+                merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_all_stub_merged.leaks")
+                n = merge_and_count([last_stub_file], merged_path)
+                if n is not None:
+                    table_data[(t["library"], t["algorithm"])][(opt, 'all_stub')] = n
+                    print(f"  [ALL STUB] {n} unique leak(s)")
+        elif cats['stub_iterations']:
+            # Last stub iteration — use raw count
+            raw = len(parse_leaks(cats['last_stub'])) if cats['last_stub'] else 0
+            table_data[(t["library"], t["algorithm"])][(opt, 'all_stub')] = raw
+            if raw > 0:
+                print(f"  [ALL STUB] {raw} leak(s) (raw, .leaks generation failed)")
 
-        # 4. Combined (all stub iterations merged)
-        if stub_leaks_files:
-            merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_combined_merged.leaks")
-            n = merge_and_count(stub_leaks_files, merged_path)
+        # 4. Progressive (all iterations merged: auto_0 + auto_1 + ... + auto_N-1)
+        progressive_files = []
+        if no_stub_leaks:
+            progressive_files.append(no_stub_leaks)
+        progressive_files.extend(stub_leaks_files)
+        if progressive_files:
+            merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_progressive_merged.leaks")
+            n = merge_and_count(progressive_files, merged_path)
             if n is not None:
-                table_data[(t["library"], t["algorithm"])][(opt, 'combined')] = n
-                print(f"  [COMBINED] {n} unique leak(s)")
+                table_data[(t["library"], t["algorithm"])][(opt, 'progressive')] = n
+                print(f"  [PROGRESSIVE] {n} unique leak(s)")
+        elif cats['no_stub'] or cats['stub_iterations']:
+            # Logs exist but no .leaks produced — sum raw counts
+            raw_total = 0
+            if cats['no_stub']:
+                raw_total += len(parse_leaks(cats['no_stub']))
+            for lp in cats['stub_iterations']:
+                raw_total += len(parse_leaks(lp))
+            table_data[(t["library"], t["algorithm"])][(opt, 'progressive')] = raw_total
 
-        # 5. Final run (auto_final): generate .leaks, merge (dedup), count
+        # 5. All-stubs run (auto_allstubs): generate .leaks, merge (dedup), count
+        allstubs_leaks = make_leaks_file(cats['allstubs'], t)
+        if allstubs_leaks:
+            merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_allstubs_merged.leaks")
+            n = merge_and_count([allstubs_leaks], merged_path)
+            if n is not None:
+                table_data[(t["library"], t["algorithm"])][(opt, 'allstubs')] = n
+                print(f"  [ALL STUBS] {n} unique leak(s)")
+            all_leaks_files.append(allstubs_leaks)
+        elif cats['allstubs']:
+            raw = len(parse_leaks(cats['allstubs']))
+            table_data[(t["library"], t["algorithm"])][(opt, 'allstubs')] = raw
+            if raw > 0:
+                print(f"  [ALL STUBS] {raw} leak(s) (raw, .leaks generation failed)")
+
+        # 6. Final run (auto_final): generate .leaks, merge (dedup), count
         final_leaks = make_leaks_file(cats['final'], t)
         if final_leaks:
             merged_path = os.path.join(opt_dir, f"{lib_str}_{t['algorithm']}_final_merged.leaks")
@@ -705,6 +953,11 @@ def main():
                 table_data[(t["library"], t["algorithm"])][(opt, 'final')] = n
                 print(f"  [FINAL] {n} unique leak(s)")
             all_leaks_files.append(final_leaks)
+        elif cats['final']:
+            raw = len(parse_leaks(cats['final']))
+            table_data[(t["library"], t["algorithm"])][(opt, 'final')] = raw
+            if raw > 0:
+                print(f"  [FINAL] {raw} leak(s) (raw, .leaks generation failed)")
 
         # Also handle plain (non-auto) log if present and no auto logs found
         if not cats['no_stub'] and not cats['final'] and cats['plain']:
@@ -744,7 +997,8 @@ def main():
         print(f"[COMPRESS] {len(compress_procs)} logs compressed")
 
     print("=" * 60)
-    print(f"[SUMMARY] {passed} passed, {failed} failed, {len(tests)} total")
+    skip_info = f", {skipped} skipped" if skipped else ""
+    print(f"[SUMMARY] {passed} passed, {failed} failed, {len(tests)} total{skip_info}")
 
     if failed > 0:
         print("\nFailed tests:")
@@ -768,6 +1022,14 @@ def main():
     # Print per-library leak tables
     if table_data:
         print_leak_tables(table_data, tests)
+
+    # Print per-library stub tables from JSON results
+    print_stub_tables(tests, root)
+
+    wall_elapsed = time.time() - wall_start
+    hours, rem = divmod(int(wall_elapsed), 3600)
+    mins, secs = divmod(rem, 60)
+    print(f"\n[TIME] Total wall time: {hours}h {mins}m {secs}s ({wall_elapsed:.0f}s)")
 
     if failed > 0:
         sys.exit(1)
