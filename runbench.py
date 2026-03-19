@@ -73,6 +73,7 @@ def parse_args():
     parser.add_argument("--build", action="store_true", help="Build the benchmark before running")
     parser.add_argument("--memlimit", type=int, default=16384, help="Memory limit in MB (default: 16384 = 16GB, 0 = unlimited)")
     parser.add_argument("--auto", action="store_true", help="Auto mode: iteratively discover and add bignum stubs")
+    parser.add_argument("--tree", action="store_true", help="Tree mode: start with all stubs, progressively unstub to find leak sources")
     parser.add_argument("--group", type=int, default=0, help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
     parser.add_argument("--clean", action="store_true", help="Delete existing results and reports for this primitive before running")
 
@@ -92,7 +93,9 @@ def main():
 # ============================================================================ 
 
 def drive_test(args):
-    if args.auto:
+    if args.tree:
+        return tree_test(args)
+    elif args.auto:
         return auto_test(args)
     elif args.batch_file:
         return batch_file_test(args)
@@ -690,6 +693,21 @@ def find_stub_files_for_auto(binsec_root, library, platform, target_funcs, keyle
     return func_to_file
 
 
+def build_stub_func_map(stub_files):
+    """Build a mapping of function_name -> stub_file_path for a set of stub files."""
+    func_to_file = {}
+    for fpath in stub_files:
+        try:
+            with open(fpath) as f:
+                content = f.read()
+            for func in REPLACE_DIRECTIVE_RE.findall(content):
+                if func not in func_to_file:
+                    func_to_file[func] = fpath
+        except (OSError, IOError):
+            pass
+    return func_to_file
+
+
 def find_all_keylen_stubs(binsec_root, library, platform, keylen=0):
     """Find ALL .ini stub files for a library that are keylen-compatible.
 
@@ -732,6 +750,400 @@ def find_all_keylen_stubs(binsec_root, library, platform, keylen=0):
                 stub_files.add(fpath)
 
     return stub_files
+
+
+def tree_test(args):
+    """Tree mode: start with all stubs, progressively unstub to find leak sources."""
+    script_root = f"{args.root}/binsec/"
+
+    base_ini = f"{script_root}{args.platform}/core.ini" if args.startfrom == "core" else \
+               f"{script_root}{args.platform}/{args.startfrom}"
+
+    library_str = args.library if not args.optimization else f"{args.library}-{args.optimization}"
+
+    base_dir = f"{script_root}{args.platform}/{args.library}"
+
+    # Base library stubs (loaded when bn is enabled)
+    base_stub_files = list_files(base_dir)
+    base_stubs = ("," + ",".join(base_stub_files)) if base_stub_files else ""
+
+    # Load keylen config and resolve
+    keylen_config = load_keylen_config(args.root)
+    resolved_keylen = args.keylen
+    try:
+        if args.library in keylen_config:
+            lib_conf = keylen_config[args.library]
+            if args.algorithm in lib_conf:
+                alg_conf = lib_conf[args.algorithm]
+                if args.platform in alg_conf:
+                    resolved_keylen = alg_conf[args.platform]
+    except Exception:
+        pass
+
+    bn_option = f"-bn -bn-backend {args.library} -bn-keylen {resolved_keylen} "
+
+    base_root_ini = base_ini if args.nature == "dry" else \
+                    f"{base_ini},{script_root}{args.platform}/{args.nature}.ini"
+
+    random_file = ""
+    random_dir = f"{script_root}{args.platform}/{args.library}/random"
+    if os.path.exists(random_dir):
+        if args.random == RandomMode.RANDOM.value:
+            random_file = f",{random_dir}/rand.ini"
+        else:
+            random_file = f",{random_dir}/const.ini"
+
+    algorithm = args.algorithm
+    nature = args.nature
+
+    gs_path = ""
+    if args.platform == Platform.X86.value:
+        gs_path = f",{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/gs.ini"
+
+    extra = f",{args.extra}" if args.extra else ""
+    tag = args.tag if not args.tag else f"_{args.tag}"
+
+    dbg = 0 if args.no_details else 2
+    if args.report and dbg < 2:
+        dbg = 2
+
+    # Determine binary path
+    if args.startfrom == "core":
+        binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}.core"
+    else:
+        binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}"
+
+    # Auto-build
+    if args.build or args.startfrom == "core":
+        if not prepare_benchmark(args.root, args.platform, library_str, args.algorithm):
+            print(f"[ERROR] Failed to prepare benchmark, aborting", file=sys.stderr)
+            return False
+
+    # Create output directory
+    output_path = f"{args.root}/results/{args.platform}/{library_str}/{algorithm}"
+    os.makedirs(output_path, exist_ok=True)
+
+    # Clean if requested
+    if args.clean:
+        import glob as _glob
+        for f in _glob.glob(os.path.join(output_path, "*")):
+            os.remove(f)
+            print(f"[CLEAN] Removed {os.path.relpath(f, args.root)}")
+        if args.report:
+            report_base = args.report
+        else:
+            report_base = os.path.join(args.root, "reports")
+        if args.optimization:
+            report_dir = os.path.join(report_base, args.optimization)
+        else:
+            report_dir = report_base
+        if os.path.isdir(report_dir):
+            pattern = os.path.join(report_dir, f"{library_str}_{algorithm}*")
+            for f in _glob.glob(pattern):
+                os.remove(f)
+                print(f"[CLEAN] Removed {os.path.relpath(f, args.root)}")
+
+    # Find all keylen-compatible stubs
+    all_stubs = find_all_keylen_stubs(script_root, args.library, args.platform, resolved_keylen)
+    func_to_file = build_stub_func_map(all_stubs)
+
+    # Reverse map: file -> set of functions
+    file_to_funcs = {}
+    for func, fpath in func_to_file.items():
+        if fpath not in file_to_funcs:
+            file_to_funcs[fpath] = set()
+        file_to_funcs[fpath].add(func)
+
+    success = True
+    iteration_stats = []
+    iteration_leaks_files = []
+
+    def run_tree_iteration(label, stub_files, log_name):
+        """Run binsec with given stub files. Returns (n_alerts, n_unique, hooked_bn)."""
+        stub_scripts = ("," + ",".join(sorted(stub_files))) if stub_files else ""
+        script_files = (
+            f"{base_root_ini},{script_root}{args.platform}/mem.ini"
+            f"{random_file}{gs_path}{extra}{base_stubs}{stub_scripts}"
+        )
+        log_file = f"{output_path}/{nature}_tree_{log_name}{tag}.log"
+
+        run_cmd = (
+            f"binsec -sse -checkct {bn_option}-sse-missing-symbol warn -sse-script {script_files} "
+            f"-sse-debug-level {dbg} -sse-depth 1000000000 "
+            f"-fml-solver-timeout 600 -sse-timeout {args.timeout} {binary_path} "
+            f"-smt-solver bitwuzla:smtlib"
+        )
+
+        parts = run_cmd.split()
+        if not parts:
+            return 0, 0, set(), log_file
+
+        program = parts[0]
+        run_args = parts[1:]
+
+        print(f"[CASE] tree {label}")
+        nonlocal success
+        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+            success = False
+
+        n_alerts = count_leaks_in_log(log_file)
+        hooked_bn = get_hooked_bn_functions(log_file, args.library)
+
+        # Generate .leaks and count unique
+        n_unique = 0
+        leaks_path = log_file.replace('.log', '.leaks')
+        if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+            n = count_unique_in_leaks([leaks_path])
+            if n is not None:
+                n_unique = n
+            iteration_leaks_files.append(leaks_path)
+        elif n_alerts > 0:
+            n_unique = len(get_unique_leak_addrs(log_file))
+
+        return n_alerts, n_unique, hooked_bn, log_file
+
+    # ── Phase 0: All stubs ──
+    print(f"\n{'='*60}")
+    print(f"[TREE] Phase 0: All stubs ({len(all_stubs)} files, {count_stubbed_functions(all_stubs)} functions)")
+    print(f"{'='*60}")
+
+    n_alerts, n_unique, hooked_bn, log_file = run_tree_iteration(
+        "allstubs", all_stubs, "allstubs"
+    )
+
+    print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
+    for f in sorted(hooked_bn):
+        print(f"    {f}")
+
+    iteration_stats.append({
+        "phase": "allstubs",
+        "removed": None,
+        "parent": None,
+        "alerts": n_alerts,
+        "unique_alerts": n_unique,
+        "stubs": count_stubbed_functions(all_stubs),
+        "hooked_bn": len(hooked_bn),
+        "hooked_bn_funcs": sorted(hooked_bn),
+        "log_file": os.path.relpath(log_file, args.root),
+    })
+
+    # ── Progressive unstubbing ──
+    # Queue: list of (func_to_remove, parent_phase, current_stub_set)
+    # Start with all hooked BN functions from phase 0
+    current_stubs = set(all_stubs)
+    unstub_queue = []
+    seen_funcs = set()  # all BN functions we've already queued for removal
+
+    # Sort by function name for deterministic order
+    for func in sorted(hooked_bn):
+        if func in func_to_file:
+            unstub_queue.append((func, "allstubs", set(current_stubs)))
+            seen_funcs.add(func)
+
+    step = 0
+    while unstub_queue:
+        func_to_remove, parent, stubs_snapshot = unstub_queue.pop(0)
+        step += 1
+
+        # Find the stub file for this function and remove it
+        stub_file = func_to_file.get(func_to_remove)
+        if not stub_file or stub_file not in stubs_snapshot:
+            print(f"\n[TREE] Step {step}: {func_to_remove} — no stub file to remove, skipping")
+            continue
+
+        new_stubs = stubs_snapshot - {stub_file}
+        removed_funcs = file_to_funcs.get(stub_file, {func_to_remove})
+
+        print(f"\n{'='*60}")
+        print(f"[TREE] Step {step}: Remove {func_to_remove}")
+        print(f"  Parent: {parent}")
+        print(f"  Stub file: {os.path.relpath(stub_file, args.root)}")
+        if len(removed_funcs) > 1:
+            print(f"  Also removes: {', '.join(sorted(removed_funcs - {func_to_remove}))}")
+        print(f"  Remaining stubs: {len(new_stubs)} files")
+        print(f"{'='*60}")
+
+        phase_name = f"remove_{func_to_remove}"
+        n_alerts, n_unique, hooked_bn, log_file = run_tree_iteration(
+            f"step {step} (remove {func_to_remove})", new_stubs, f"s{step}_{func_to_remove}"
+        )
+
+        if hooked_bn:
+            print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
+            for f in sorted(hooked_bn):
+                print(f"    {f}")
+
+        # Find newly exposed BN functions (hooked now but not seen before)
+        new_bn = hooked_bn - seen_funcs
+        if new_bn:
+            print(f"  [NEW BN] {len(new_bn)} newly exposed:")
+            for f in sorted(new_bn):
+                print(f"    {f}")
+            # Add them to the queue with current stubs as snapshot
+            for f in sorted(new_bn):
+                if f in func_to_file:
+                    unstub_queue.append((f, phase_name, set(new_stubs)))
+                    seen_funcs.add(f)
+                else:
+                    print(f"    {f} — no stub available, cannot unstub further")
+
+        iteration_stats.append({
+            "phase": phase_name,
+            "removed": func_to_remove,
+            "parent": parent,
+            "alerts": n_alerts,
+            "unique_alerts": n_unique,
+            "stubs": count_stubbed_functions(new_stubs),
+            "hooked_bn": len(hooked_bn),
+            "hooked_bn_funcs": sorted(hooked_bn),
+            "log_file": os.path.relpath(log_file, args.root),
+        })
+
+    # ── Final run: no stubs, extended timeout ──
+    is_keygen = "keygen" in algorithm
+    total_runs = step + 1  # allstubs + N steps
+    final_timeout = args.timeout * (total_runs + 1)
+    final_bn = bn_option if is_keygen else ""
+    final_base_stubs = base_stubs if is_keygen else ""
+
+    bn_label = "with BN" if is_keygen else "no BN"
+    print(f"\n{'='*60}")
+    print(f"[TREE] Final run ({bn_label}, no stubs, timeout={final_timeout}s)")
+    print(f"{'='*60}")
+
+    script_files = (
+        f"{base_root_ini},{script_root}{args.platform}/mem.ini"
+        f"{random_file}{gs_path}{extra}{final_base_stubs}"
+    )
+    log_file = f"{output_path}/{nature}_tree_final{tag}.log"
+    run_cmd = (
+        f"binsec -sse -checkct {final_bn}-sse-missing-symbol warn -sse-script {script_files} "
+        f"-sse-debug-level {dbg} -sse-depth 1000000000 "
+        f"-fml-solver-timeout 600 -sse-timeout {final_timeout} {binary_path} "
+        f"-smt-solver bitwuzla:smtlib"
+    )
+    parts = run_cmd.split()
+    if parts:
+        program = parts[0]
+        run_args = parts[1:]
+        print(f"[CASE] tree final")
+        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+            success = False
+
+        n_alerts = count_leaks_in_log(log_file)
+        leaks_path = log_file.replace('.log', '.leaks')
+        n_unique = 0
+        if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+            n = count_unique_in_leaks([leaks_path])
+            if n is not None:
+                n_unique = n
+            iteration_leaks_files.append(leaks_path)
+        elif n_alerts > 0:
+            n_unique = len(get_unique_leak_addrs(log_file))
+        hooked_bn = get_hooked_bn_functions(log_file, args.library)
+
+        iteration_stats.append({
+            "phase": "final",
+            "removed": None,
+            "parent": None,
+            "alerts": n_alerts,
+            "unique_alerts": n_unique,
+            "stubs": 0,
+            "hooked_bn": len(hooked_bn),
+            "hooked_bn_funcs": sorted(hooked_bn),
+            "log_file": os.path.relpath(log_file, args.root),
+        })
+        if hooked_bn:
+            print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
+            for f in sorted(hooked_bn):
+                print(f"    {f}")
+
+    # ── Summary ──
+    print(f"\n{'='*60}")
+    print(f"[TREE] Summary")
+    print(f"{'='*60}")
+    print(f"  {'Phase':<40s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}")
+    print(f"  {'-'*76}")
+    for s in iteration_stats:
+        phase = s['phase']
+        if s.get('parent'):
+            phase = f"  {phase} (from {s['parent']})"
+        print(f"  {phase:<40s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}")
+
+    # ── Merged unique alerts across all runs ──
+    merged_total = count_unique_in_leaks(iteration_leaks_files)
+    if merged_total is None:
+        merged_total = 0
+
+    print(f"\n  {'='*76}")
+    print(f"  Total unique source-level alerts (merged): {merged_total}")
+
+    if merged_total > 0 and iteration_leaks_files:
+        # Run merge_reports to get the actual unique alerts and print them
+        merge_reports_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "merge_reports.py")
+        import tempfile
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.merged', delete=False, mode='w') as tmp:
+                tmp_path = tmp.name
+            valid_files = [f for f in iteration_leaks_files if os.path.exists(f) and os.path.getsize(f) > 0]
+            if valid_files:
+                r = subprocess.run(
+                    [sys.executable, merge_reports_script, '--uniq-source', '-o', tmp_path] + valid_files,
+                    capture_output=True, text=True, timeout=60
+                )
+                if r.returncode == 0:
+                    with open(tmp_path, 'r') as f:
+                        in_entry = False
+                        for line in f:
+                            line = line.rstrip('\n')
+                            if re.match(r'^UNIQUE #\d+', line):
+                                in_entry = True
+                                print(f"  {line}")
+                            elif in_entry:
+                                if line.startswith('-' * 40) or line.startswith('=' * 40):
+                                    in_entry = False
+                                elif line.strip() == '':
+                                    in_entry = False
+                                    print()
+                                else:
+                                    # Print just the leak site line (with <--)
+                                    if '<--' in line:
+                                        cleaned = re.sub(r'\[0x[0-9a-fA-F]+\]\s*', '', line)
+                                        cleaned = re.sub(r'^[\s└─│├]+', '', cleaned).strip()
+                                        print(f"    -> {cleaned}")
+                                        in_entry = False
+        except Exception:
+            pass
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    print(f"  {'='*76}")
+
+    # ── Write JSON ──
+    json_data = {
+        "library": args.library,
+        "primitive": algorithm,
+        "optimization": args.optimization or "",
+        "nature": nature,
+        "platform": args.platform,
+        "timeout": args.timeout,
+        "keylen": resolved_keylen,
+        "mode": "tree",
+        "iterations": iteration_stats,
+        "total_unique_alerts": merged_total,
+    }
+    json_file = os.path.join(
+        output_path,
+        f"{nature}_{library_str}_{algorithm}_tree{tag}.json"
+    )
+    with open(json_file, 'w') as jf:
+        json.dump(json_data, jf, indent=2)
+    print(f"\n[TREE] Results written to {os.path.relpath(json_file, args.root)}")
+
+    return success
 
 
 def auto_test(args):
