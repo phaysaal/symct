@@ -74,6 +74,7 @@ def parse_args():
     parser.add_argument("--memlimit", type=int, default=16384, help="Memory limit in MB (default: 16384 = 16GB, 0 = unlimited)")
     parser.add_argument("--auto", action="store_true", help="Auto mode: iteratively discover and add bignum stubs")
     parser.add_argument("--tree", action="store_true", help="Tree mode: start with all stubs, progressively unstub to find leak sources")
+    parser.add_argument("--dead-erase", action="store_true", help="In tree mode, auto-generate empty stubs for dead regions (no leaks, no BN) to speed up subsequent runs")
     parser.add_argument("--group", type=int, default=0, help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
     parser.add_argument("--clean", action="store_true", help="Delete existing results and reports for this primitive before running")
 
@@ -693,6 +694,119 @@ def find_stub_files_for_auto(binsec_root, library, platform, target_funcs, keyle
     return func_to_file
 
 
+def find_dead_region_funcs(log_file, library, existing_stubs):
+    """Find functions in the trace that are dead regions — no leaks in their subtree.
+
+    A function is a dead region candidate if:
+    - It appears in the trace (was explored)
+    - It is NOT a BN function
+    - It is NOT already stubbed (not in hook at lines)
+    - No leaks were found at any address within it or its callees
+
+    Returns set of function names suitable for empty stub generation.
+    """
+    import gzip as _gzip
+    from collections import defaultdict
+
+    if not os.path.exists(log_file) and os.path.exists(log_file + ".gz"):
+        log_file = log_file + ".gz"
+
+    func_line_counts = defaultdict(int)
+    leak_funcs = set()  # functions that directly have leaks
+    hooked_funcs = set()  # functions that were stubbed (hook at)
+    call_graph = defaultdict(set)  # caller -> set of callees
+    last_func = None
+
+    try:
+        opener = _gzip.open if log_file.endswith(".gz") else open
+        with opener(log_file, 'rt') as f:
+            for line in f:
+                if '[sse:debug]' in line:
+                    m = ADDR_ANNOTATION_RE.search(line)
+                    if m:
+                        func_name = m.group(2)
+                        func_line_counts[func_name] += 1
+                        if last_func and last_func != func_name:
+                            call_graph[last_func].add(func_name)
+                        last_func = func_name
+                    else:
+                        m2 = FUNC_ANNOTATION_RE.search(line)
+                        if m2:
+                            func_name = m2.group(1)
+                            func_line_counts[func_name] += 1
+                            if last_func and last_func != func_name:
+                                call_graph[last_func].add(func_name)
+                            last_func = func_name
+
+                if AUTO_LEAK_RE.search(line):
+                    # The leak is at the current function
+                    if last_func:
+                        leak_funcs.add(last_func)
+
+                m = HOOK_AT_RE.search(line)
+                if m:
+                    hooked_funcs.add(m.group(1))
+    except (OSError, IOError):
+        return set()
+
+    # Build set of functions with leaks in subtree (transitive closure)
+    # A function has "tainted subtree" if it or any of its callees (recursively) has a leak
+    tainted = set(leak_funcs)
+    changed = True
+    while changed:
+        changed = False
+        for caller, callees in call_graph.items():
+            if caller not in tainted and any(c in tainted for c in callees):
+                tainted.add(caller)
+                changed = True
+
+    # Get names of all functions replaced by existing stubs
+    existing_stub_funcs = set()
+    for fpath in existing_stubs:
+        try:
+            with open(fpath) as f:
+                existing_stub_funcs.update(REPLACE_DIRECTIVE_RE.findall(f.read()))
+        except (OSError, IOError):
+            pass
+
+    # Dead region: explored, not BN, not already stubbed, not tainted
+    dead = set()
+    for func in func_line_counts:
+        if func in tainted:
+            continue
+        if is_bn_function(func, library):
+            continue
+        if func in hooked_funcs:
+            continue
+        if func in existing_stub_funcs:
+            continue
+        # Must have significant trace presence (skip tiny functions)
+        if func_line_counts[func] < 100:
+            continue
+        dead.add(func)
+
+    return dead
+
+
+def generate_empty_stubs(func_names, output_dir, prefix="dead"):
+    """Generate empty stub .ini files for the given functions.
+
+    Creates one file per function: replace <func>(_) by return 0 end
+
+    Returns set of generated file paths.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    generated = set()
+    for func in sorted(func_names):
+        stub_path = os.path.join(output_dir, f"{prefix}_{func}.ini")
+        with open(stub_path, 'w') as f:
+            f.write(f"replace <{func}>(_) by\n")
+            f.write(f"        return 0\n")
+            f.write(f"end\n")
+        generated.add(stub_path)
+    return generated
+
+
 def build_stub_func_map(stub_files):
     """Build a mapping of function_name -> stub_file_path for a set of stub files."""
     func_to_file = {}
@@ -857,10 +971,15 @@ def tree_test(args):
     success = True
     iteration_stats = []
     iteration_leaks_files = []
+    dead_stub_files = set()  # auto-generated empty stubs for dead regions
+    dead_stub_dir = os.path.join(output_path, "dead_stubs")
+    all_dead_funcs = set()  # all functions we've generated dead stubs for
 
     def run_tree_iteration(label, stub_files, log_name):
         """Run binsec with given stub files. Returns (n_alerts, n_unique, hooked_bn)."""
-        stub_scripts = ("," + ",".join(sorted(stub_files))) if stub_files else ""
+        # Include dead region stubs
+        combined_stubs = stub_files | dead_stub_files
+        stub_scripts = ("," + ",".join(sorted(combined_stubs))) if combined_stubs else ""
         script_files = (
             f"{base_root_ini},{script_root}{args.platform}/mem.ini"
             f"{random_file}{gs_path}{extra}{base_stubs}{stub_scripts}"
@@ -927,12 +1046,26 @@ def tree_test(args):
         "log_file": os.path.relpath(log_file, args.root),
     })
 
+    # Dead-erase: generate empty stubs for dead regions after allstubs run
+    if args.dead_erase:
+        dead_funcs = find_dead_region_funcs(log_file, args.library, all_stubs)
+        if dead_funcs:
+            new_dead = dead_funcs - all_dead_funcs
+            if new_dead:
+                gen = generate_empty_stubs(new_dead, dead_stub_dir)
+                dead_stub_files.update(gen)
+                all_dead_funcs.update(new_dead)
+                print(f"  [DEAD-ERASE] Generated {len(new_dead)} empty stubs for dead regions:")
+                for f in sorted(new_dead):
+                    print(f"    {f}")
+
     # ── Progressive unstubbing ──
     # Queue: list of (func_to_remove, parent_phase, current_stub_set)
     # Start with all hooked BN functions from phase 0
     current_stubs = set(all_stubs)
     unstub_queue = []
     seen_funcs = set()  # all BN functions we've already queued for removal
+    dead_funcs = set()  # functions whose removal produced no leaks and no new hooks
 
     # Sort by function name for deterministic order
     for func in sorted(hooked_bn):
@@ -954,6 +1087,12 @@ def tree_test(args):
         new_stubs = stubs_snapshot - {stub_file}
         removed_funcs = file_to_funcs.get(stub_file, {func_to_remove})
 
+        # Re-add stubs for dead functions to keep execution fast
+        for df in dead_funcs:
+            df_file = func_to_file.get(df)
+            if df_file and df_file not in new_stubs:
+                new_stubs.add(df_file)
+
         print(f"\n{'='*60}")
         print(f"[TREE] Step {step}: Remove {func_to_remove}")
         print(f"  Parent: {parent}")
@@ -961,6 +1100,8 @@ def tree_test(args):
         if len(removed_funcs) > 1:
             print(f"  Also removes: {', '.join(sorted(removed_funcs - {func_to_remove}))}")
         print(f"  Remaining stubs: {len(new_stubs)} files")
+        if dead_funcs:
+            print(f"  Dead branches re-stubbed: {len(dead_funcs)}")
         print(f"{'='*60}")
 
         phase_name = f"remove_{func_to_remove}"
@@ -975,7 +1116,12 @@ def tree_test(args):
 
         # Find newly exposed BN functions (hooked now but not seen before)
         new_bn = hooked_bn - seen_funcs
-        if new_bn:
+        is_dead = (n_alerts == 0 and len(new_bn) == 0)
+
+        if is_dead:
+            print(f"  [DEAD BRANCH] No leaks, no new BN hooks — pruning")
+            dead_funcs.add(func_to_remove)
+        elif new_bn:
             print(f"  [NEW BN] {len(new_bn)} newly exposed:")
             for f in sorted(new_bn):
                 print(f"    {f}")
@@ -996,8 +1142,24 @@ def tree_test(args):
             "stubs": count_stubbed_functions(new_stubs),
             "hooked_bn": len(hooked_bn),
             "hooked_bn_funcs": sorted(hooked_bn),
+            "dead": is_dead,
             "log_file": os.path.relpath(log_file, args.root),
         })
+
+        # Dead-erase after each step
+        if args.dead_erase and not is_dead:
+            dead_funcs_step = find_dead_region_funcs(log_file, args.library, new_stubs | dead_stub_files)
+            new_dead = dead_funcs_step - all_dead_funcs
+            if new_dead:
+                gen = generate_empty_stubs(new_dead, dead_stub_dir)
+                dead_stub_files.update(gen)
+                all_dead_funcs.update(new_dead)
+                print(f"  [DEAD-ERASE] Generated {len(new_dead)} new empty stubs:")
+                for f in sorted(new_dead):
+                    print(f"    {f}")
+
+    if args.dead_erase and all_dead_funcs:
+        print(f"\n[DEAD-ERASE] Total: {len(all_dead_funcs)} dead region stubs generated")
 
     # ── Final run: no stubs, extended timeout ──
     is_keygen = "keygen" in algorithm
@@ -1068,7 +1230,10 @@ def tree_test(args):
         phase = s['phase']
         if s.get('parent'):
             phase = f"  {phase} (from {s['parent']})"
-        print(f"  {phase:<40s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}")
+        dead_mark = " [DEAD]" if s.get('dead') else ""
+        print(f"  {phase:<40s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}{dead_mark}")
+    if dead_funcs:
+        print(f"\n  Dead branches ({len(dead_funcs)}): {', '.join(sorted(dead_funcs))}")
 
     # ── Merged unique alerts across all runs ──
     merged_total = count_unique_in_leaks(iteration_leaks_files)
@@ -1132,6 +1297,8 @@ def tree_test(args):
         "timeout": args.timeout,
         "keylen": resolved_keylen,
         "mode": "tree",
+        "dead_erase": args.dead_erase,
+        "dead_region_funcs": sorted(all_dead_funcs) if all_dead_funcs else [],
         "iterations": iteration_stats,
         "total_unique_alerts": merged_total,
     }
