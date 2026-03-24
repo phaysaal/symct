@@ -370,6 +370,13 @@ def single_test(args):
     if args.report_diff and iteration_leak_sites:
         print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
 
+    # LaTeX tables
+    if iteration_stats and len(iteration_stats) > 1:
+        latex_title = f"{args.library} {algorithm} {args.optimization or ''} (progressive)"
+        print_latex_table(iteration_stats, latex_title)
+        if args.report_diff and iteration_leak_sites:
+            print_latex_diff_table(iteration_stats, iteration_leak_sites, latex_title)
+
     return success
 
 # ============================================================================
@@ -595,6 +602,68 @@ def print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_time
             print(f"    {s}{time_str}")
 
     print(f"  {'='*75}")
+
+
+def print_latex_table(iteration_stats, title=""):
+    """Print a LaTeX-formatted summary table."""
+    def escape_latex(s):
+        return s.replace('_', r'\_').replace('%', r'\%').replace('&', r'\&').replace('#', r'\#')
+
+    print(f"\n% LaTeX table{' — ' + title if title else ''}")
+    print(r"\begin{table}[htbp]")
+    print(r"\centering")
+    print(r"\caption{" + escape_latex(title) + "}")
+    print(r"\begin{tabular}{l r r r r l}")
+    print(r"\hline")
+    print(r"\textbf{Phase} & \textbf{Alerts} & \textbf{Uniq Src} & \textbf{Stubs} & \textbf{BN Hook} & \textbf{BN Functions} \\")
+    print(r"\hline")
+    for s in iteration_stats:
+        phase = escape_latex(s.get('phase', ''))
+        alerts = s.get('alerts', 0)
+        unique = s.get('unique_alerts', 0)
+        stubs = s.get('stubs', 0)
+        hooked = s.get('hooked_bn', 0)
+        bn_funcs = ", ".join(s.get('hooked_bn_funcs', []))
+        bn_funcs = escape_latex(bn_funcs)
+        if len(bn_funcs) > 60:
+            bn_funcs = bn_funcs[:57] + "..."
+        dead = " $\\dagger$" if s.get('dead') else ""
+        print(f"{phase}{dead} & {alerts} & {unique} & {stubs} & {hooked} & {bn_funcs} \\\\")
+    print(r"\hline")
+    print(r"\end{tabular}")
+    print(r"\end{table}")
+
+
+def print_latex_diff_table(iteration_stats, iteration_leak_sites, title=""):
+    """Print a LaTeX-formatted diff table."""
+    def escape_latex(s):
+        return s.replace('_', r'\_').replace('%', r'\%').replace('&', r'\&').replace('#', r'\#')
+
+    print(f"\n% LaTeX diff table{' — ' + title if title else ''}")
+    print(r"\begin{table}[htbp]")
+    print(r"\centering")
+    print(r"\caption{Leak diff: " + escape_latex(title) + "}")
+    print(r"\begin{tabular}{l r r}")
+    print(r"\hline")
+    print(r"\textbf{Phase} & \textbf{Unique} & \textbf{Delta} \\")
+    print(r"\hline")
+
+    prev_sites = set()
+    for i, (stat, sites) in enumerate(zip(iteration_stats, iteration_leak_sites)):
+        phase = escape_latex(stat.get('phase', ''))
+        n = len(sites) if sites else stat.get('unique_alerts', 0)
+        if i == 0 or not prev_sites:
+            delta = ""
+        else:
+            removed = prev_sites - sites
+            added = sites - prev_sites
+            delta = f"$(-{len(removed)},+{len(added)})$"
+        print(f"{phase} & {n} & {delta} \\\\")
+        prev_sites = sites if sites else prev_sites
+
+    print(r"\hline")
+    print(r"\end{tabular}")
+    print(r"\end{table}")
 
 
 def _clean_hierarchy_line(line):
@@ -881,48 +950,10 @@ def parse_log_for_auto(log_file, library):
     return func_line_counts, leak_call_chains, dict(call_graph)
 
 
-def find_target_bn_functions(func_line_counts, library, leak_bn_funcs=None, cumulative_threshold=0.75):
-    """Determine which BN functions need stubs.
+def find_immediate_bn_caller_with_stub(func, call_graph, func_to_file, library):
+    """Walk up the call graph from func to find the closest BN caller with a stub.
 
-    1. Sort all functions by line count descending.
-    2. Take the shortest prefix whose cumulative share crosses cumulative_threshold.
-    3. Filter to BN functions only.
-    4. Always include any BN function that has a leak, regardless of share.
-
-    Returns set of BN function names to target for stubbing.
-    """
-    total_lines = sum(func_line_counts.values())
-    if total_lines == 0:
-        return set()
-
-    sorted_funcs = sorted(func_line_counts.items(), key=lambda x: -x[1])
-
-    target_funcs = set()
-    cumulative = 0.0
-    for func, count in sorted_funcs:
-        if cumulative / total_lines >= cumulative_threshold:
-            break
-        cumulative += count
-        if is_bn_function(func, library):
-            target_funcs.add(func)
-
-    # Always include leaking BN functions
-    if leak_bn_funcs:
-        target_funcs.update(leak_bn_funcs)
-
-    return target_funcs
-
-
-def resolve_stubs_via_callers(target_funcs, func_to_file, call_graph, library):
-    """For each target BN function, find a stub — either directly or via callers.
-
-    For functions that have a stub file directly, use that.
-    For functions without a stub, walk up the call graph to find the closest
-    caller (BN function) that has a stub file.
-
-    Returns:
-        resolved: dict of func -> stub_file (includes both direct and caller stubs)
-        resolutions: list of (func, resolved_via, caller_chain) for reporting
+    Returns (resolved_func, caller_chain) or (None, chain) if not found.
     """
     # Build reverse call graph: callee -> [(caller, count)]
     reverse_graph = {}
@@ -932,39 +963,79 @@ def resolve_stubs_via_callers(target_funcs, func_to_file, call_graph, library):
                 reverse_graph[callee] = []
             reverse_graph[callee].append((caller, count))
 
+    visited = set()
+    caller_chain = [func]
+    current = func
+
+    # Check if func itself is BN and has a stub
+    if is_bn_function(func, library) and func in func_to_file:
+        return func, caller_chain
+
+    for _ in range(10):  # max depth
+        callers = reverse_graph.get(current, [])
+        # Sort by transition count (most frequent first)
+        bn_callers = [(c, n) for c, n in callers if is_bn_function(c, library) and c not in visited]
+        if not bn_callers:
+            break
+        bn_callers.sort(key=lambda x: -x[1])
+        best_caller = bn_callers[0][0]
+        visited.add(best_caller)
+        caller_chain.append(best_caller)
+
+        if best_caller in func_to_file:
+            return best_caller, caller_chain
+        current = best_caller
+
+    return None, caller_chain
+
+
+def resolve_leak_based_stubs(leak_call_chains, func_to_file, call_graph, library):
+    """Priority 1: For each leaking function, find immediate BN caller with a stub.
+
+    Returns:
+        resolved: dict of func -> stub_file
+        resolutions: list of (leak_func, resolved_via, caller_chain, source) for reporting
+    """
     resolved = {}
     resolutions = []
 
-    for func in sorted(target_funcs):
-        if func in func_to_file:
-            # Direct stub exists
-            resolved[func] = func_to_file[func]
-            resolutions.append((func, func, [func]))
-        else:
-            # Walk up call graph to find a caller with a stub
-            visited = set()
-            caller_chain = [func]
-            current = func
-            found = None
+    # Collect unique leaf functions from leak chains
+    leak_funcs = set()
+    for chain in leak_call_chains:
+        if chain:
+            leak_funcs.add(chain[0])  # deepest function in chain
 
-            for _ in range(10):  # max depth
-                callers = reverse_graph.get(current, [])
-                # Filter to BN callers, sort by transition count (most frequent first)
-                bn_callers = [(c, n) for c, n in callers if is_bn_function(c, library) and c not in visited]
-                if not bn_callers:
-                    break
-                bn_callers.sort(key=lambda x: -x[1])
-                best_caller = bn_callers[0][0]
-                visited.add(best_caller)
-                caller_chain.append(best_caller)
+    for func in sorted(leak_funcs):
+        found, chain = find_immediate_bn_caller_with_stub(func, call_graph, func_to_file, library)
+        if found:
+            resolved[found] = func_to_file[found]
+        resolutions.append((func, found, chain, "leak"))
 
-                if best_caller in func_to_file:
-                    found = best_caller
-                    resolved[best_caller] = func_to_file[best_caller]
-                    break
-                current = best_caller
+    return resolved, resolutions
 
-            resolutions.append((func, found, caller_chain))
+
+def resolve_complexity_based_stubs(func_line_counts, func_to_file, call_graph, library, threshold=0.33):
+    """Priority 2: For functions with >=threshold share, find immediate BN callers with stubs.
+
+    Returns:
+        resolved: dict of func -> stub_file
+        resolutions: list of (complex_func, resolved_via, caller_chain, source) for reporting
+    """
+    total_lines = sum(func_line_counts.values())
+    if total_lines == 0:
+        return {}, []
+
+    resolved = {}
+    resolutions = []
+
+    for func, count in sorted(func_line_counts.items(), key=lambda x: -x[1]):
+        pct = count / total_lines
+        if pct < threshold:
+            break
+        found, chain = find_immediate_bn_caller_with_stub(func, call_graph, func_to_file, library)
+        if found:
+            resolved[found] = func_to_file[found]
+        resolutions.append((func, found, chain, "complexity"))
 
     return resolved, resolutions
 
@@ -1588,6 +1659,12 @@ def tree_test(args):
     if args.report_diff and iteration_leak_sites:
         print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
 
+    # LaTeX tables
+    latex_title = f"{args.library} {algorithm} {args.optimization or ''} (tree)"
+    print_latex_table(iteration_stats, latex_title)
+    if args.report_diff and iteration_leak_sites:
+        print_latex_diff_table(iteration_stats, iteration_leak_sites, latex_title)
+
     # ── Merged unique alerts across all runs ──
     merged_total = count_unique_in_leaks(iteration_leaks_files)
     if merged_total is None:
@@ -1901,71 +1978,79 @@ def auto_test(args):
         if remaining > 0:
             print(f"    ... and {remaining} more functions in remaining {100 - 100*cumulative/total_lines:.1f}%")
 
-        # Find target BN functions (top cumulative share + any leaking BN)
-        target_funcs = find_target_bn_functions(func_counts, args.library, leak_bn_funcs)
-
-        if target_funcs:
-            print()
-            print(f"  BN stub targets ({len(target_funcs)} from above):")
-            for f in sorted(target_funcs, key=lambda x: -func_counts.get(x, 0)):
-                c = func_counts.get(f, 0)
-                pct = 100 * c / total_lines
-                leak_mark = " *** LEAK" if f in leak_bn_funcs else ""
-                print(f"    {f:40s} {c:8d}  ({pct:5.1f}%){leak_mark}")
-
         bn_dominant = bn_lines / total_lines > 0.50
         print()
         print(f"  BN dominance (>50%): {'YES' if bn_dominant else 'NO'} ({100*bn_lines/total_lines:.1f}%)")
 
-        if not target_funcs:
-            print(f"  No bignum functions to stub.")
-            print(f"  {'─'*56}")
-            break
-
-        # Find stub files for ALL BN functions in the trace (not just targets)
-        # so that call graph walks can discover caller stubs
+        # Find stub files for ALL BN functions in the trace
         all_bn_funcs = {f for f in func_counts if is_bn_function(f, args.library)}
         func_to_file = find_stub_files_for_auto(script_root, args.library, args.platform, all_bn_funcs, resolved_keylen)
 
-        # Resolve stubs: direct match or walk up call graph to find caller with stub
-        resolved, resolutions = resolve_stubs_via_callers(target_funcs, func_to_file, call_graph, args.library)
+        # Priority 1: Resolve leak-based stubs
+        leak_resolved, leak_resolutions = resolve_leak_based_stubs(
+            leak_call_chains, func_to_file, call_graph, args.library
+        )
 
-        # Show resolution details
-        if resolutions:
-            direct = sum(1 for f, via, chain in resolutions if via == f)
-            via_caller = sum(1 for f, via, chain in resolutions if via and via != f)
-            unresolved = sum(1 for f, via, chain in resolutions if via is None)
+        strategy = None
+        resolved = {}
+        resolutions = []
+
+        if leak_resolved:
+            strategy = "leak"
+            resolved = leak_resolved
+            resolutions = leak_resolutions
             print()
-            print(f"  Stub resolution: {direct} direct, {via_caller} via caller, {unresolved} unresolved")
-            for func, via, chain in resolutions:
-                pct = 100 * func_counts.get(func, 0) / total_lines
-                if via == func:
-                    print(f"    {func:40s} ({pct:5.1f}%) -> DIRECT stub")
-                elif via:
+            print(f"  Strategy: LEAK-BASED ({len(leak_resolved)} BN callers found for leaking functions)")
+            for func, via, chain, src in leak_resolutions:
+                if via:
                     chain_str = " -> ".join(chain)
-                    print(f"    {func:40s} ({pct:5.1f}%) -> via {via}")
+                    print(f"    {func:40s} -> stub {via}")
                     print(f"      chain: {chain_str}")
                 else:
-                    print(f"    {func:40s} ({pct:5.1f}%) -> NO STUB")
+                    print(f"    {func:40s} -> NO BN CALLER WITH STUB")
+        else:
+            # Priority 2: Resolve complexity-based stubs (>=33% share)
+            complexity_resolved, complexity_resolutions = resolve_complexity_based_stubs(
+                func_counts, func_to_file, call_graph, args.library, threshold=0.33
+            )
 
-        # Merge resolved stubs into func_to_file (caller stubs found by graph walk)
+            if complexity_resolved:
+                strategy = "complexity"
+                resolved = complexity_resolved
+                resolutions = complexity_resolutions
+                print()
+                print(f"  Strategy: COMPLEXITY-BASED (functions with >=33% share)")
+                for func, via, chain, src in complexity_resolutions:
+                    pct = 100 * func_counts.get(func, 0) / total_lines
+                    if via:
+                        chain_str = " -> ".join(chain)
+                        print(f"    {func:40s} ({pct:5.1f}%) -> stub {via}")
+                        print(f"      chain: {chain_str}")
+                    else:
+                        print(f"    {func:40s} ({pct:5.1f}%) -> NO BN CALLER WITH STUB")
+            else:
+                print()
+                print(f"  No leak-based or complexity-based stubs found.")
+                print(f"  {'─'*56}")
+                break
+
+        # Merge resolved stubs into func_to_file
         for func_name, stub_file in resolved.items():
             if func_name not in func_to_file:
                 func_to_file[func_name] = stub_file
 
         # Determine new files not yet accumulated
-        all_new_files = set(func_to_file.values()) - accumulated_stubs
-        covered_funcs = set(func_to_file.keys())
-        missing = target_funcs - covered_funcs
+        resolved_files = set(resolved.values())
+        new_files = resolved_files - accumulated_stubs
 
         # Rank new files by total trace share of the functions they replace
         def file_trace_share(fpath):
             funcs = [f for f, fp in func_to_file.items() if fp == fpath]
             return sum(func_counts.get(f, 0) for f in funcs)
 
-        ranked_new = sorted(all_new_files, key=file_trace_share, reverse=True)
+        ranked_new = sorted(new_files, key=file_trace_share, reverse=True)
 
-        # Apply --group limit: pick top K new files per iteration
+        # Apply --group limit
         if args.group > 0 and len(ranked_new) > args.group:
             new_files = set(ranked_new[:args.group])
             deferred = set(ranked_new[args.group:])
@@ -1973,7 +2058,7 @@ def auto_test(args):
             new_files = set(ranked_new)
             deferred = set()
 
-        # Functions to be stubbed next (only from selected new_files)
+        # Functions to be stubbed next
         next_funcs = {f for f, fp in func_to_file.items() if fp in new_files}
 
         print()
@@ -1981,13 +2066,7 @@ def auto_test(args):
             print(f"  Functions to stub NEXT ({len(next_funcs)}):")
             for f in sorted(next_funcs, key=lambda x: -func_counts.get(x, 0)):
                 fpath = func_to_file[f]
-                c = func_counts.get(f, 0)
-                via_mark = ""
-                for orig, via, chain in resolutions:
-                    if via == f and orig != f:
-                        via_mark = f" [CALLER of {orig}]"
-                        break
-                print(f"    {f:40s} -> {os.path.basename(fpath)}{via_mark}")
+                print(f"    {f:40s} -> {os.path.basename(fpath)}")
 
         if deferred:
             deferred_funcs = {f for f, fp in func_to_file.items() if fp in deferred}
@@ -1995,14 +2074,10 @@ def auto_test(args):
             for f in sorted(deferred_funcs, key=lambda x: -func_counts.get(x, 0)):
                 print(f"    {f:40s} -> {os.path.basename(func_to_file[f])}")
 
-        # Already-stubbed functions (from previous iterations)
+        # Already-stubbed functions
         already_stubbed = {f for f, fp in func_to_file.items() if fp in accumulated_stubs}
         if already_stubbed:
             print(f"  Already stubbed ({len(already_stubbed)}): {', '.join(sorted(already_stubbed))}")
-
-        # Missing stubs
-        if missing:
-            print(f"  No stubs available ({len(missing)}): {', '.join(sorted(missing))}")
 
         print(f"  {'─'*56}")
 
@@ -2204,6 +2279,12 @@ def auto_test(args):
     # Diff report
     if args.report_diff and iteration_leak_sites:
         print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
+
+    # LaTeX tables
+    latex_title = f"{args.library} {algorithm} {args.optimization or ''} (auto)"
+    print_latex_table(iteration_stats, latex_title)
+    if args.report_diff and iteration_leak_sites:
+        print_latex_diff_table(iteration_stats, iteration_leak_sites, latex_title)
 
     # ── Write JSON results ──
     json_data = {
