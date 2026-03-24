@@ -315,9 +315,12 @@ def single_test(args):
 
         if args.report_diff and leaks_file and os.path.exists(leaks_file):
             sites = extract_unique_leak_sites([leaks_file])
+            times = extract_leak_sites_with_time(leaks_file)
             iteration_leak_sites.append(sites if sites else set())
+            iteration_leak_times.append(times if times else {})
         else:
             iteration_leak_sites.append(set())
+            iteration_leak_times.append({})
 
     # Merge reports if progressive mode
     if report_dir and args.progressive and len(leaks_files) > 1:
@@ -338,7 +341,7 @@ def single_test(args):
 
     # Diff report
     if args.report_diff and iteration_leak_sites:
-        print_diff_report(iteration_stats, iteration_leak_sites)
+        print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
 
     return success
 
@@ -484,13 +487,17 @@ def count_unique_in_leaks(leaks_files):
             pass
 
 
-def print_diff_report(iteration_stats, iteration_leak_sites):
+def print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times=None):
     """Print a per-iteration diff report showing added/removed leaks.
 
     Args:
         iteration_stats: list of dicts with 'phase', 'unique_alerts', etc.
         iteration_leak_sites: list of sets of leak site strings (parallel to iteration_stats)
+        iteration_leak_times: list of dicts mapping site -> earliest_time (parallel, optional)
     """
+    if iteration_leak_times is None:
+        iteration_leak_times = [{} for _ in iteration_stats]
+
     print(f"\n{'='*80}")
     print(f"LEAK DIFF REPORT")
     print(f"{'='*80}")
@@ -526,12 +533,14 @@ def print_diff_report(iteration_stats, iteration_leak_sites):
     # Detailed list of all changes
     print(f"\n  Detailed changes per iteration:")
     prev_sites = set()
-    for i, (stat, sites) in enumerate(zip(iteration_stats, iteration_leak_sites)):
+    for i, (stat, sites, times) in enumerate(zip(iteration_stats, iteration_leak_sites, iteration_leak_times)):
         if i == 0:
             if sites:
                 print(f"\n  [{stat['phase']}] Initial leaks ({len(sites)}):")
                 for s in sorted(sites):
-                    print(f"    {s}")
+                    t = times.get(s)
+                    time_str = f" @ {t:.3f}s" if t is not None else ""
+                    print(f"    {s}{time_str}")
             prev_sites = sites if sites else set()
             continue
 
@@ -543,11 +552,66 @@ def print_diff_report(iteration_stats, iteration_leak_sites):
             for s in sorted(removed):
                 print(f"    - {s}")
             for s in sorted(added):
-                print(f"    + {s}")
+                t = times.get(s)
+                time_str = f" @ {t:.3f}s" if t is not None else ""
+                print(f"    + {s}{time_str}")
 
         prev_sites = sites if sites else prev_sites
 
     print(f"  {'='*75}")
+
+
+def extract_leak_sites_with_time(leaks_file):
+    """Parse a single .leaks file and extract leak sites with their time.
+
+    Returns a dict mapping site_key -> earliest_time (float seconds).
+    site_key is "[leak_type] func (file:line)".
+    """
+    sites = {}
+    if not leaks_file or not os.path.exists(leaks_file):
+        return sites
+
+    try:
+        with open(leaks_file, 'r') as f:
+            lines = f.readlines()
+    except (OSError, IOError):
+        return sites
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip('\n')
+        if re.match(r'^VIOLATION #\d+', line):
+            leak_type = ""
+            leak_time = 0.0
+            site = None
+            i += 1
+            while i < len(lines):
+                l = lines[i].rstrip('\n')
+                if re.match(r'^VIOLATION #\d+', l) or l.startswith('=' * 40):
+                    break
+                # Extract leak type
+                m = re.match(r'^Leak Type:\s+(.+)$', l)
+                if m:
+                    leak_type = m.group(1).strip()
+                # Extract time
+                m = re.match(r'^Time:\s+([\d.]+)s', l)
+                if m:
+                    leak_time = float(m.group(1))
+                # Extract leak site from hierarchy
+                if '<--' in l and 'leak' in l:
+                    cleaned = re.sub(r'\[0x[0-9a-fA-F]+\]\s*', '', l)
+                    cleaned = re.sub(r'\s*<--.*$', '', cleaned)
+                    cleaned = re.sub(r'^[\s└─│├]+', '', cleaned).strip()
+                    site = f"[{leak_type}] {cleaned}"
+                i += 1
+
+            if site:
+                if site not in sites or leak_time < sites[site]:
+                    sites[site] = leak_time
+            continue
+        i += 1
+
+    return sites
 
 
 def extract_unique_leak_sites(leaks_files):
@@ -583,11 +647,15 @@ def extract_unique_leak_sites(leaks_files):
                 m = re.match(r'^UNIQUE #\d+\s+\((.+?)\s+leak\)', line)
                 if m:
                     leak_type = m.group(1)
-                # Scan for the leak site line (contains <--)
+                # Skip the dash separator line after the header
                 i += 1
+                if i < len(lines) and lines[i].rstrip('\n').startswith('-' * 40):
+                    i += 1
+                # Scan for the leak site line (contains <--)
                 while i < len(lines):
                     l = lines[i].rstrip('\n')
-                    if re.match(r'^(UNIQUE|─|═)', l) or (l.startswith('-' * 40)):
+                    # Stop at next entry or section boundary
+                    if re.match(r'^UNIQUE #\d+', l) or l.startswith('=' * 40):
                         break
                     if '<--' in l and 'leak' in l:
                         # Clean it: strip address, tree chars, whitespace
@@ -1140,6 +1208,7 @@ def tree_test(args):
     iteration_stats = []
     iteration_leaks_files = []
     iteration_leak_sites = []  # list of sets of leak site strings per iteration (for diff report)
+    iteration_leak_times = []  # list of dicts mapping site -> earliest_time (parallel)
     dead_stub_files = set()  # auto-generated empty stubs for dead regions
     dead_stub_dir = os.path.join(output_path, "dead_stubs")
     all_dead_funcs = set()  # all functions we've generated dead stubs for
@@ -1322,9 +1391,12 @@ def tree_test(args):
         })
         if args.report_diff and leaks_path and os.path.exists(leaks_path):
             sites = extract_unique_leak_sites([leaks_path])
+            times = extract_leak_sites_with_time(leaks_path)
             iteration_leak_sites.append(sites if sites else set())
+            iteration_leak_times.append(times if times else {})
         else:
             iteration_leak_sites.append(set())
+            iteration_leak_times.append({})
 
         # Dead-erase after each step
         if args.dead_erase and not is_dead:
@@ -1397,9 +1469,12 @@ def tree_test(args):
         })
         if args.report_diff and leaks_path and os.path.exists(leaks_path):
             sites = extract_unique_leak_sites([leaks_path])
+            times = extract_leak_sites_with_time(leaks_path)
             iteration_leak_sites.append(sites if sites else set())
+            iteration_leak_times.append(times if times else {})
         else:
             iteration_leak_sites.append(set())
+            iteration_leak_times.append({})
         if hooked_bn:
             print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
             for f in sorted(hooked_bn):
@@ -1425,7 +1500,7 @@ def tree_test(args):
 
     # Diff report
     if args.report_diff and iteration_leak_sites:
-        print_diff_report(iteration_stats, iteration_leak_sites)
+        print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
 
     # ── Merged unique alerts across all runs ──
     merged_total = count_unique_in_leaks(iteration_leaks_files)
@@ -1605,6 +1680,7 @@ def auto_test(args):
     iteration_stats = []  # list of dicts: {iteration, phase, alerts, unique_alerts, stubs, log_file}
     iteration_leaks_files = []  # .leaks file paths per iteration (for progressive merge)
     iteration_leak_sites = []  # list of sets of leak site strings per iteration (for diff report)
+    iteration_leak_times = []  # list of dicts mapping site -> earliest_time (parallel)
 
     while True:
         print(f"\n{'='*60}")
@@ -1682,9 +1758,12 @@ def auto_test(args):
         # Track leak sites for diff report
         if args.report_diff and leaks_path and os.path.exists(leaks_path):
             sites = extract_unique_leak_sites([leaks_path])
+            times = extract_leak_sites_with_time(leaks_path)
             iteration_leak_sites.append(sites if sites else set())
+            iteration_leak_times.append(times if times else {})
         else:
             iteration_leak_sites.append(set())
+            iteration_leak_times.append({})
 
         if hooked_bn:
             print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
@@ -1923,9 +2002,12 @@ def auto_test(args):
         })
         if args.report_diff and leaks_path and os.path.exists(leaks_path):
             sites = extract_unique_leak_sites([leaks_path])
+            times = extract_leak_sites_with_time(leaks_path)
             iteration_leak_sites.append(sites if sites else set())
+            iteration_leak_times.append(times if times else {})
         else:
             iteration_leak_sites.append(set())
+            iteration_leak_times.append({})
         if hooked_bn:
             print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
             for f in sorted(hooked_bn):
@@ -1988,9 +2070,12 @@ def auto_test(args):
         })
         if args.report_diff and leaks_path and os.path.exists(leaks_path):
             sites = extract_unique_leak_sites([leaks_path])
+            times = extract_leak_sites_with_time(leaks_path)
             iteration_leak_sites.append(sites if sites else set())
+            iteration_leak_times.append(times if times else {})
         else:
             iteration_leak_sites.append(set())
+            iteration_leak_times.append({})
         if hooked_bn:
             print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
             for f in sorted(hooked_bn):
@@ -2032,7 +2117,7 @@ def auto_test(args):
 
     # Diff report
     if args.report_diff and iteration_leak_sites:
-        print_diff_report(iteration_stats, iteration_leak_sites)
+        print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
 
     # ── Write JSON results ──
     json_data = {
