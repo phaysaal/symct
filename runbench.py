@@ -77,6 +77,7 @@ def parse_args():
     parser.add_argument("--dead-erase", action="store_true", help="In tree mode, auto-generate empty stubs for dead regions (no leaks, no BN) to speed up subsequent runs")
     parser.add_argument("--group", type=int, default=0, help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
     parser.add_argument("--report-diff", action="store_true", help="Show per-iteration leak diff report (new/removed leaks between iterations)")
+    parser.add_argument("--parallel", action="store_true", help="In progressive mode, run all iterations in parallel")
     parser.add_argument("--clean", action="store_true", help="Delete existing results and reports for this primitive before running")
 
     return parser.parse_args()
@@ -243,8 +244,9 @@ def single_test(args):
     iteration_leak_times = []
     success = True
 
-    # Run tests for each combination
+    # Build all run configurations
     total_combs = len(all_combs)
+    run_configs = []  # list of (name, cmd_parts, log_file, stubs_list)
     for idx, (name, c) in enumerate(all_combs, 1):
         bn_scripts = ""
         if c:
@@ -255,40 +257,64 @@ def single_test(args):
         script_list = f"_{name}"
         log_file = f"{args.root}/results/{args.platform}/{library_str}/{algorithm}/{nature}{script_list}{tag}.log"
 
-        run_bn = bn_option
-        run_sse_script = script_files
-        run_timeout = args.timeout
-        run_source = binary_path
-        run_debug_level = dbg
-        run_solver_timeout = 600
-        run_sse_depth = 1000000000
-
         run_cmd = (
-            f"binsec -sse -checkct {run_bn}-sse-missing-symbol warn -sse-script {run_sse_script} "
-            f"-sse-debug-level {run_debug_level} -sse-depth {run_sse_depth} "
-            f"-fml-solver-timeout {run_solver_timeout} -sse-timeout {run_timeout} {run_source} "
+            f"binsec -sse -checkct {bn_option}-sse-missing-symbol warn -sse-script {script_files} "
+            f"-sse-debug-level {dbg} -sse-depth 1000000000 "
+            f"-fml-solver-timeout 600 -sse-timeout {args.timeout} {binary_path} "
             f"-smt-solver bitwuzla:smtlib"
         )
 
         parts = run_cmd.split()
-        if not parts:
-            continue
+        if parts:
+            run_configs.append((name, idx, parts, log_file, c))
 
-        program = parts[0]
-        run_args = parts[1:]
+    # Run tests — parallel or sequential
+    if args.parallel and len(run_configs) > 1:
+        print(f"[PARALLEL] Launching {len(run_configs)} tests simultaneously")
+        procs = []
+        for name, idx, parts, log_file, c in run_configs:
+            print(f"  [LAUNCH {idx}/{total_combs}] step={name} -> {os.path.relpath(log_file)}")
+            preexec = make_memlimit_fn(args.memlimit) if args.memlimit > 0 else None
+            lf = open(log_file, 'w')
+            proc = subprocess.Popen(
+                parts, stdout=lf, stderr=lf, preexec_fn=preexec
+            )
+            procs.append((name, idx, proc, lf, log_file, c))
 
-        if args.progressive:
-            print(f"[STEP {idx}/{total_combs}] progressive={args.progressive} step={name}")
-        print(f"[CASE] {bn_scripts}")
-        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
-            success = False
+        # Wait for all to finish
+        print(f"[PARALLEL] Waiting for all {len(procs)} tests to complete...")
+        for name, idx, proc, lf, log_file, c in procs:
+            proc.wait()
+            lf.close()
+            status = "OK" if proc.returncode == 0 else "FAIL"
+            if proc.returncode == -9:
+                status = "KILLED (OOM)"
+            elif proc.returncode != 0:
+                success = False
+            print(f"  [{status}] step={name} -> {os.path.relpath(log_file)}")
 
-        # Generate callstack2source report if --report is given
+        # Collect log files in order
+        completed = [(name, idx, log_file, c) for name, idx, _, _, log_file, c in procs]
+    else:
+        # Sequential execution
+        completed = []
+        for name, idx, parts, log_file, c in run_configs:
+            program = parts[0]
+            run_args = parts[1:]
+
+            if args.progressive:
+                print(f"[STEP {idx}/{total_combs}] progressive={args.progressive} step={name}")
+            print(f"[CASE] {','.join(c) if c else '(no stubs)'}")
+            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+                success = False
+            completed.append((name, idx, log_file, c))
+
+    # Post-processing: generate reports and collect stats
+    for name, idx, log_file, c in completed:
         n_alerts = count_leaks_in_log(log_file)
         n_unique = 0
         leaks_file = None
         if report_dir:
-            # Use the non-.core binary for addr2line/objdump (it has debug symbols)
             debug_binary = binary_path
             if debug_binary.endswith('.core'):
                 debug_binary = debug_binary[:-5]
@@ -571,8 +597,25 @@ def print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_time
     print(f"  {'='*75}")
 
 
+def _clean_hierarchy_line(line):
+    """Clean a hierarchy line: strip address, tree chars, whitespace."""
+    cleaned = re.sub(r'\[0x[0-9a-fA-F]+\]\s*', '', line)
+    cleaned = re.sub(r'\s*<--.*$', '', cleaned)
+    cleaned = re.sub(r'^[\s└─│├]+', '', cleaned).strip()
+    return cleaned
+
+
+def _is_resolved(cleaned):
+    """Check if a cleaned hierarchy line has a resolved source (not ?? or empty)."""
+    stripped = re.sub(r'[└─│\s\t]', '', cleaned)
+    return stripped and stripped != '??' and '(' in cleaned
+
+
 def extract_leak_sites_with_time(leaks_file):
     """Parse a single .leaks file and extract leak sites with their time.
+
+    If the leak site is '??', walks up the call hierarchy to find the
+    last resolved caller.
 
     Returns a dict mapping site_key -> earliest_time (float seconds).
     site_key is "[leak_type] func (file:line)".
@@ -594,6 +637,8 @@ def extract_leak_sites_with_time(leaks_file):
             leak_type = ""
             leak_time = 0.0
             site = None
+            hierarchy_lines = []
+            in_hierarchy = False
             i += 1
             while i < len(lines):
                 l = lines[i].rstrip('\n')
@@ -607,12 +652,31 @@ def extract_leak_sites_with_time(leaks_file):
                 m = re.match(r'^Time:\s+([\d.]+)s', l)
                 if m:
                     leak_time = float(m.group(1))
+                # Track hierarchy lines
+                if l.startswith('CALL HIERARCHY:'):
+                    in_hierarchy = True
+                    i += 1  # skip dash line
+                    i += 1
+                    continue
+                if in_hierarchy:
+                    if l.strip() == '' or l.startswith('-' * 40):
+                        in_hierarchy = False
+                    else:
+                        hierarchy_lines.append(l)
                 # Extract leak site from hierarchy
                 if '<--' in l and 'leak' in l:
-                    cleaned = re.sub(r'\[0x[0-9a-fA-F]+\]\s*', '', l)
-                    cleaned = re.sub(r'\s*<--.*$', '', cleaned)
-                    cleaned = re.sub(r'^[\s└─│├]+', '', cleaned).strip()
-                    site = f"[{leak_type}] {cleaned}"
+                    cleaned = _clean_hierarchy_line(l)
+                    if _is_resolved(cleaned):
+                        site = f"[{leak_type}] {cleaned}"
+                    else:
+                        # ?? — walk up hierarchy to find last resolved caller
+                        for hl in reversed(hierarchy_lines[:-1]):
+                            parent = _clean_hierarchy_line(hl)
+                            if _is_resolved(parent):
+                                site = f"[{leak_type}] {parent}"
+                                break
+                        if not site:
+                            site = f"[{leak_type}] {cleaned}"
                 i += 1
 
             if site:
@@ -661,18 +725,30 @@ def extract_unique_leak_sites(leaks_files):
                 i += 1
                 if i < len(lines) and lines[i].rstrip('\n').startswith('-' * 40):
                     i += 1
-                # Scan for the leak site line (contains <--)
+                # Collect hierarchy lines and find leak site
+                hier_lines = []
                 while i < len(lines):
                     l = lines[i].rstrip('\n')
                     # Stop at next entry or section boundary
                     if re.match(r'^UNIQUE #\d+', l) or l.startswith('=' * 40):
                         break
+                    if l.strip():
+                        hier_lines.append(l)
                     if '<--' in l and 'leak' in l:
-                        # Clean it: strip address, tree chars, whitespace
-                        cleaned = re.sub(r'\[0x[0-9a-fA-F]+\]\s*', '', l)
-                        cleaned = re.sub(r'\s*<--.*$', '', cleaned)
-                        cleaned = re.sub(r'^[\s└─│├]+', '', cleaned).strip()
-                        sites.add(f"[{leak_type}] {cleaned}")
+                        cleaned = _clean_hierarchy_line(l)
+                        if _is_resolved(cleaned):
+                            sites.add(f"[{leak_type}] {cleaned}")
+                        else:
+                            # ?? — walk up hierarchy to find last resolved caller
+                            found = False
+                            for hl in reversed(hier_lines[:-1]):
+                                parent = _clean_hierarchy_line(hl)
+                                if _is_resolved(parent):
+                                    sites.add(f"[{leak_type}] {parent}")
+                                    found = True
+                                    break
+                            if not found:
+                                sites.add(f"[{leak_type}] {cleaned}")
                         break
                     i += 1
             i += 1
