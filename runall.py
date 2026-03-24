@@ -3,6 +3,7 @@
 """Run all available benchmark tests as a smoke test."""
 
 import argparse
+import concurrent.futures
 import glob as glob_mod
 import gzip
 import json
@@ -712,6 +713,8 @@ def main():
                         help="Show per-iteration leak diff report in runbench")
     parser.add_argument("--parallel", action="store_true",
                         help="In progressive mode, run all iterations in parallel")
+    parser.add_argument("--parallel-tests", type=int, default=0,
+                        help="Run N primitives in parallel (0 = sequential, default)")
     parser.add_argument("--group", type=int, default=0,
                         help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
@@ -836,38 +839,78 @@ def main():
         return None
 
     skipped = 0
-    last_lib = None
-    for i, t in enumerate(tests):
-        cur_lib = f"{t['library']}-{t['optimization']}" if t["optimization"] else t["library"]
-        if cur_lib != last_lib:
-            print(f"\n{'─'*60}\n  {cur_lib}\n{'─'*60}")
-            last_lib = cur_lib
-        label = t["label"]
-        prog_info = ""
-        if args.progressive is not None:
-            prog_dir = args.progressive if args.progressive else get_progressive_dir(t["algorithm"], t["library"])
-            if prog_dir:
-                prog_info = f" [progressive={prog_dir}]"
-        print(f"[{i+1}/{len(tests)}] {label}{prog_info}")
 
-        # --missing: skip if complete logs already exist
+    def execute_test(i, t):
+        """Run a single test. Returns (index, test, label, success, elapsed, cmd_str, was_skipped)."""
+        label = t["label"]
         if args.missing and has_complete_logs(t, root):
-            print(f"  -> SKIP (logs already exist)")
+            return (i, t, label, True, 0, "skipped", True)
+        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group, args.tree, args.dead_erase, args.report_diff, args.parallel)
+        return (i, t, label, success, elapsed, cmd_str, False)
+
+    # Parallel or sequential execution
+    if args.parallel_tests > 0:
+        print(f"[PARALLEL] Running up to {args.parallel_tests} primitives concurrently")
+        test_results_unordered = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel_tests) as executor:
+            futures = {}
+            for i, t in enumerate(tests):
+                f = executor.submit(execute_test, i, t)
+                futures[f] = (i, t)
+
+            for f in concurrent.futures.as_completed(futures):
+                i, t = futures[f]
+                result = f.result()
+                _, _, label, success, elapsed, cmd_str, was_skipped = result
+                status = "SKIP" if was_skipped else ("OK" if success else "FAIL")
+                time_str = f" ({elapsed:.0f}s)" if not was_skipped else ""
+                print(f"  [{status}] [{i+1}/{len(tests)}] {label}{time_str}")
+                test_results_unordered.append(result)
+
+        # Sort by original index for ordered post-processing
+        test_results_ordered = sorted(test_results_unordered, key=lambda x: x[0])
+    else:
+        # Sequential execution
+        test_results_ordered = []
+        last_lib = None
+        for i, t in enumerate(tests):
+            cur_lib = f"{t['library']}-{t['optimization']}" if t["optimization"] else t["library"]
+            if cur_lib != last_lib:
+                print(f"\n{'─'*60}\n  {cur_lib}\n{'─'*60}")
+                last_lib = cur_lib
+            label = t["label"]
+            prog_info = ""
+            if args.progressive is not None:
+                prog_dir = args.progressive if args.progressive else get_progressive_dir(t["algorithm"], t["library"])
+                if prog_dir:
+                    prog_info = f" [progressive={prog_dir}]"
+            print(f"[{i+1}/{len(tests)}] {label}{prog_info}")
+
+            result = execute_test(i, t)
+            _, _, label, success, elapsed, cmd_str, was_skipped = result
+            if was_skipped:
+                print(f"  -> SKIP (logs already exist)")
+            elif success:
+                print(f"  -> OK ({elapsed:.0f}s)")
+            else:
+                print(f"  -> FAIL ({elapsed:.0f}s)")
+            test_results_ordered.append(result)
+
+    # Collect results
+    for i, t, label, success, elapsed, cmd_str, was_skipped in test_results_ordered:
+        if was_skipped:
             skipped += 1
             passed += 1
             results.append((label, True, 0, "skipped"))
         else:
-            label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group, args.tree, args.dead_erase, args.report_diff, args.parallel)
-
             if success:
-                print(f"  -> OK ({elapsed:.0f}s)")
                 passed += 1
             else:
-                print(f"  -> FAIL ({elapsed:.0f}s)")
                 failed += 1
-
             results.append((label, success, elapsed, cmd_str))
 
+    # Post-processing: categorize logs, generate reports, merge
+    for ri, (i, t, label, success, elapsed, cmd_str, was_skipped) in enumerate(test_results_ordered):
         if not report_dir:
             continue
 
@@ -1002,7 +1045,8 @@ def main():
                 compress_procs.append((t["label"], proc, log_path))
 
         # Check if next test is a different (library, opt) group — merge current group
-        next_lib_opt = get_lib_opt(tests[i + 1]) if i + 1 < len(tests) else None
+        next_idx = ri + 1
+        next_lib_opt = get_lib_opt(test_results_ordered[next_idx][1]) if next_idx < len(test_results_ordered) else None
         cur_lib_opt = get_lib_opt(t)
         if next_lib_opt != cur_lib_opt and leaks_by_lib_opt[cur_lib_opt]:
             merge_lib_opt(t["library"], t["optimization"], leaks_by_lib_opt[cur_lib_opt])
