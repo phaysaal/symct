@@ -240,6 +240,7 @@ def single_test(args):
     leaks_files = []
     iteration_stats = []
     iteration_leak_sites = []
+    iteration_leak_times = []
     success = True
 
     # Run tests for each combination
