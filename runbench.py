@@ -551,6 +551,23 @@ def print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_time
 
         prev_sites = sites if sites else prev_sites
 
+    # Total unique across all iterations
+    all_sites = set()
+    all_times = {}
+    for sites, times in zip(iteration_leak_sites, iteration_leak_times):
+        if sites:
+            all_sites |= sites
+            for s, t in times.items():
+                if s not in all_times or t < all_times[s]:
+                    all_times[s] = t
+
+    print(f"\n  Total unique alerts across all iterations: {len(all_sites)}")
+    if all_sites:
+        for s in sorted(all_sites):
+            t = all_times.get(s)
+            time_str = f" @ {t:.3f}s" if t is not None else ""
+            print(f"    {s}{time_str}")
+
     print(f"  {'='*75}")
 
 
