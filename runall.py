@@ -635,7 +635,7 @@ def print_stub_tables(tests, root):
         print()
 
 
-def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0, tree=False, dead_erase=False):
+def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0, tree=False, dead_erase=False, report_diff=False):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
         sys.executable, os.path.join(root, "runbench.py"),
@@ -655,6 +655,9 @@ def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0
             cmd += ["--dead-erase"]
     elif auto:
         cmd += ["--auto"]
+
+    if report_diff:
+        cmd += ["--report-diff"]
 
     if group > 0:
         cmd += ["--group", str(group)]
@@ -702,6 +705,8 @@ def main():
                         help="Tree mode: start with all stubs, progressively unstub")
     parser.add_argument("--dead-erase", action="store_true",
                         help="In tree mode, generate empty stubs for dead regions")
+    parser.add_argument("--report-diff", action="store_true",
+                        help="Show per-iteration leak diff report in runbench")
     parser.add_argument("--group", type=int, default=0,
                         help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
@@ -847,7 +852,7 @@ def main():
             passed += 1
             results.append((label, True, 0, "skipped"))
         else:
-            label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group, args.tree, args.dead_erase)
+            label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group, args.tree, args.dead_erase, args.report_diff)
 
             if success:
                 print(f"  -> OK ({elapsed:.0f}s)")

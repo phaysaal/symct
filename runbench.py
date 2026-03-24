@@ -76,6 +76,7 @@ def parse_args():
     parser.add_argument("--tree", action="store_true", help="Tree mode: start with all stubs, progressively unstub to find leak sources")
     parser.add_argument("--dead-erase", action="store_true", help="In tree mode, auto-generate empty stubs for dead regions (no leaks, no BN) to speed up subsequent runs")
     parser.add_argument("--group", type=int, default=0, help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
+    parser.add_argument("--report-diff", action="store_true", help="Show per-iteration leak diff report (new/removed leaks between iterations)")
     parser.add_argument("--clean", action="store_true", help="Delete existing results and reports for this primitive before running")
 
     return parser.parse_args()
@@ -432,6 +433,131 @@ def count_unique_in_leaks(leaks_files):
                 if re.match(r'^UNIQUE #\d+', line):
                     count += 1
         return count
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def print_diff_report(iteration_stats, iteration_leak_sites):
+    """Print a per-iteration diff report showing added/removed leaks.
+
+    Args:
+        iteration_stats: list of dicts with 'phase', 'unique_alerts', etc.
+        iteration_leak_sites: list of sets of leak site strings (parallel to iteration_stats)
+    """
+    print(f"\n{'='*80}")
+    print(f"LEAK DIFF REPORT")
+    print(f"{'='*80}")
+    print(f"  {'Phase':<35s} {'Uniq':>5s}  {'Delta':>12s}  Details")
+    print(f"  {'-'*75}")
+
+    prev_sites = set()
+    for i, (stat, sites) in enumerate(zip(iteration_stats, iteration_leak_sites)):
+        phase = stat['phase']
+        n = len(sites) if sites else stat.get('unique_alerts', 0)
+
+        if i == 0 or not prev_sites:
+            delta_str = ""
+            detail = ""
+        else:
+            removed = prev_sites - sites
+            added = sites - prev_sites
+            delta_str = f"(-{len(removed)},+{len(added)})"
+            detail = ""
+            if removed:
+                detail += " Removed: " + "; ".join(sorted(removed))
+            if added:
+                detail += " Added: " + "; ".join(sorted(added))
+
+        # Truncate detail for display
+        if len(detail) > 120:
+            detail = detail[:117] + "..."
+
+        print(f"  {phase:<35s} {n:>5d}  {delta_str:>12s}  {detail}")
+
+    print(f"  {'-'*75}")
+
+    # Detailed list of all changes
+    print(f"\n  Detailed changes per iteration:")
+    prev_sites = set()
+    for i, (stat, sites) in enumerate(zip(iteration_stats, iteration_leak_sites)):
+        if i == 0:
+            if sites:
+                print(f"\n  [{stat['phase']}] Initial leaks ({len(sites)}):")
+                for s in sorted(sites):
+                    print(f"    {s}")
+            prev_sites = sites if sites else set()
+            continue
+
+        removed = prev_sites - sites if sites else set()
+        added = sites - prev_sites if sites else set()
+
+        if removed or added:
+            print(f"\n  [{stat['phase']}] vs [{iteration_stats[i-1]['phase']}]:")
+            for s in sorted(removed):
+                print(f"    - {s}")
+            for s in sorted(added):
+                print(f"    + {s}")
+
+        prev_sites = sites if sites else prev_sites
+
+    print(f"  {'='*75}")
+
+
+def extract_unique_leak_sites(leaks_files):
+    """Run merge_reports --uniq-source on .leaks files and extract unique leak site strings.
+
+    Returns a set of strings like "func (file:line)" for each unique leak, or None on failure.
+    """
+    merge_reports_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "merge_reports.py")
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.merged', delete=False, mode='w') as tmp:
+            tmp_path = tmp.name
+        valid_files = [f for f in leaks_files if os.path.exists(f) and os.path.getsize(f) > 0]
+        if not valid_files:
+            return set()
+        r = subprocess.run(
+            [sys.executable, merge_reports_script, '--uniq-source', '-o', tmp_path] + valid_files,
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode != 0:
+            return None
+
+        # Parse the merged output to extract leak sites
+        sites = set()
+        with open(tmp_path, 'r') as f:
+            lines = f.readlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].rstrip('\n')
+            if re.match(r'^UNIQUE #\d+', line):
+                # Extract leak type from header: "UNIQUE #N  (type leak)"
+                leak_type = ""
+                m = re.match(r'^UNIQUE #\d+\s+\((.+?)\s+leak\)', line)
+                if m:
+                    leak_type = m.group(1)
+                # Scan for the leak site line (contains <--)
+                i += 1
+                while i < len(lines):
+                    l = lines[i].rstrip('\n')
+                    if re.match(r'^(UNIQUE|─|═)', l) or (l.startswith('-' * 40)):
+                        break
+                    if '<--' in l and 'leak' in l:
+                        # Clean it: strip address, tree chars, whitespace
+                        cleaned = re.sub(r'\[0x[0-9a-fA-F]+\]\s*', '', l)
+                        cleaned = re.sub(r'\s*<--.*$', '', cleaned)
+                        cleaned = re.sub(r'^[\s└─│├]+', '', cleaned).strip()
+                        sites.add(f"[{leak_type}] {cleaned}")
+                        break
+                    i += 1
+            i += 1
+        return sites
+
     except Exception:
         return None
     finally:
@@ -971,12 +1097,13 @@ def tree_test(args):
     success = True
     iteration_stats = []
     iteration_leaks_files = []
+    iteration_leak_sites = []  # list of sets of leak site strings per iteration (for diff report)
     dead_stub_files = set()  # auto-generated empty stubs for dead regions
     dead_stub_dir = os.path.join(output_path, "dead_stubs")
     all_dead_funcs = set()  # all functions we've generated dead stubs for
 
     def run_tree_iteration(label, stub_files, log_name):
-        """Run binsec with given stub files. Returns (n_alerts, n_unique, hooked_bn)."""
+        """Run binsec with given stub files. Returns (n_alerts, n_unique, hooked_bn, log_file, leaks_path)."""
         # Include dead region stubs
         combined_stubs = stub_files | dead_stub_files
         stub_scripts = ("," + ",".join(sorted(combined_stubs))) if combined_stubs else ""
@@ -995,7 +1122,7 @@ def tree_test(args):
 
         parts = run_cmd.split()
         if not parts:
-            return 0, 0, set(), log_file
+            return 0, 0, set(), log_file, None
 
         program = parts[0]
         run_args = parts[1:]
@@ -1018,15 +1145,16 @@ def tree_test(args):
             iteration_leaks_files.append(leaks_path)
         elif n_alerts > 0:
             n_unique = len(get_unique_leak_addrs(log_file))
+            leaks_path = None
 
-        return n_alerts, n_unique, hooked_bn, log_file
+        return n_alerts, n_unique, hooked_bn, log_file, leaks_path
 
     # ── Phase 0: All stubs ──
     print(f"\n{'='*60}")
     print(f"[TREE] Phase 0: All stubs ({len(all_stubs)} files, {count_stubbed_functions(all_stubs)} functions)")
     print(f"{'='*60}")
 
-    n_alerts, n_unique, hooked_bn, log_file = run_tree_iteration(
+    n_alerts, n_unique, hooked_bn, log_file, leaks_path = run_tree_iteration(
         "allstubs", all_stubs, "allstubs"
     )
 
@@ -1045,6 +1173,11 @@ def tree_test(args):
         "hooked_bn_funcs": sorted(hooked_bn),
         "log_file": os.path.relpath(log_file, args.root),
     })
+    if args.report_diff and leaks_path and os.path.exists(leaks_path):
+        sites = extract_unique_leak_sites([leaks_path])
+        iteration_leak_sites.append(sites if sites else set())
+    else:
+        iteration_leak_sites.append(set())
 
     # Dead-erase: generate empty stubs for dead regions after allstubs run
     if args.dead_erase:
@@ -1105,7 +1238,7 @@ def tree_test(args):
         print(f"{'='*60}")
 
         phase_name = f"remove_{func_to_remove}"
-        n_alerts, n_unique, hooked_bn, log_file = run_tree_iteration(
+        n_alerts, n_unique, hooked_bn, log_file, leaks_path = run_tree_iteration(
             f"step {step} (remove {func_to_remove})", new_stubs, f"s{step}_{func_to_remove}"
         )
 
@@ -1145,6 +1278,11 @@ def tree_test(args):
             "dead": is_dead,
             "log_file": os.path.relpath(log_file, args.root),
         })
+        if args.report_diff and leaks_path and os.path.exists(leaks_path):
+            sites = extract_unique_leak_sites([leaks_path])
+            iteration_leak_sites.append(sites if sites else set())
+        else:
+            iteration_leak_sites.append(set())
 
         # Dead-erase after each step
         if args.dead_erase and not is_dead:
@@ -1215,6 +1353,11 @@ def tree_test(args):
             "hooked_bn_funcs": sorted(hooked_bn),
             "log_file": os.path.relpath(log_file, args.root),
         })
+        if args.report_diff and leaks_path and os.path.exists(leaks_path):
+            sites = extract_unique_leak_sites([leaks_path])
+            iteration_leak_sites.append(sites if sites else set())
+        else:
+            iteration_leak_sites.append(set())
         if hooked_bn:
             print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
             for f in sorted(hooked_bn):
@@ -1234,6 +1377,10 @@ def tree_test(args):
         print(f"  {phase:<40s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}{dead_mark}")
     if dead_funcs:
         print(f"\n  Dead branches ({len(dead_funcs)}): {', '.join(sorted(dead_funcs))}")
+
+    # Diff report
+    if args.report_diff and iteration_leak_sites:
+        print_diff_report(iteration_stats, iteration_leak_sites)
 
     # ── Merged unique alerts across all runs ──
     merged_total = count_unique_in_leaks(iteration_leaks_files)
@@ -1412,6 +1559,7 @@ def auto_test(args):
     success = True
     iteration_stats = []  # list of dicts: {iteration, phase, alerts, unique_alerts, stubs, log_file}
     iteration_leaks_files = []  # .leaks file paths per iteration (for progressive merge)
+    iteration_leak_sites = []  # list of sets of leak site strings per iteration (for diff report)
 
     while True:
         print(f"\n{'='*60}")
@@ -1486,6 +1634,12 @@ def auto_test(args):
             "hooked_bn_funcs": sorted(hooked_bn),
             "log_file": os.path.relpath(log_file, args.root),
         })
+        # Track leak sites for diff report
+        if args.report_diff and leaks_path and os.path.exists(leaks_path):
+            sites = extract_unique_leak_sites([leaks_path])
+            iteration_leak_sites.append(sites if sites else set())
+        else:
+            iteration_leak_sites.append(set())
 
         if hooked_bn:
             print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
@@ -1722,6 +1876,11 @@ def auto_test(args):
             "hooked_bn_funcs": sorted(hooked_bn),
             "log_file": os.path.relpath(log_file, args.root),
         })
+        if args.report_diff and leaks_path and os.path.exists(leaks_path):
+            sites = extract_unique_leak_sites([leaks_path])
+            iteration_leak_sites.append(sites if sites else set())
+        else:
+            iteration_leak_sites.append(set())
         if hooked_bn:
             print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
             for f in sorted(hooked_bn):
@@ -1782,6 +1941,11 @@ def auto_test(args):
             "hooked_bn_funcs": sorted(hooked_bn),
             "log_file": os.path.relpath(log_file, args.root),
         })
+        if args.report_diff and leaks_path and os.path.exists(leaks_path):
+            sites = extract_unique_leak_sites([leaks_path])
+            iteration_leak_sites.append(sites if sites else set())
+        else:
+            iteration_leak_sites.append(set())
         if hooked_bn:
             print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
             for f in sorted(hooked_bn):
@@ -1819,6 +1983,10 @@ def auto_test(args):
     print(f"  {'All Stubs':<20s} {'':<8s} {merged_counts['allstubs']:>8d}")
     print(f"  {'Progressive (all)':<20s} {'':<8s} {merged_counts['progressive']:>8d}")
     print(f"  {'Final':<20s} {'':<8s} {merged_counts['final']:>8d}")
+
+    # Diff report
+    if args.report_diff and iteration_leak_sites:
+        print_diff_report(iteration_stats, iteration_leak_sites)
 
     # ── Write JSON results ──
     json_data = {
