@@ -238,6 +238,8 @@ def single_test(args):
     if report_dir:
         os.makedirs(report_dir, exist_ok=True)
     leaks_files = []
+    iteration_stats = []
+    iteration_leak_sites = []
     success = True
 
     # Run tests for each combination
@@ -281,6 +283,9 @@ def single_test(args):
             success = False
 
         # Generate callstack2source report if --report is given
+        n_alerts = count_leaks_in_log(log_file)
+        n_unique = 0
+        leaks_file = None
         if report_dir:
             # Use the non-.core binary for addr2line/objdump (it has debug symbols)
             debug_binary = binary_path
@@ -291,12 +296,47 @@ def single_test(args):
             leaks_file = os.path.join(report_dir, leaks_basename)
             run_callstack2source(log_file, debug_binary, leaks_file)
             leaks_files.append(leaks_file)
+            n = count_unique_in_leaks([leaks_file])
+            if n is not None:
+                n_unique = n
+
+        phase_name = name if args.progressive else f"run_{idx}"
+        stubs_count = count_stubbed_functions(set(c)) if c else 0
+        hooked_bn = get_hooked_bn_functions(log_file, args.library) if args.bn else set()
+
+        iteration_stats.append({
+            "phase": phase_name,
+            "alerts": n_alerts,
+            "unique_alerts": n_unique,
+            "stubs": stubs_count,
+            "hooked_bn": len(hooked_bn),
+        })
+
+        if args.report_diff and leaks_file and os.path.exists(leaks_file):
+            sites = extract_unique_leak_sites([leaks_file])
+            iteration_leak_sites.append(sites if sites else set())
+        else:
+            iteration_leak_sites.append(set())
 
     # Merge reports if progressive mode
     if report_dir and args.progressive and len(leaks_files) > 1:
         merged_name = f"{args.library}_{algorithm}_{args.platform}{tag}.leaks"
         merged_file = os.path.join(report_dir, merged_name)
         run_merge_reports(leaks_files, merged_file)
+
+    # Summary table
+    if iteration_stats and len(iteration_stats) > 1:
+        print(f"\n{'='*60}")
+        print(f"[PROGRESSIVE] Summary")
+        print(f"{'='*60}")
+        print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}")
+        print(f"  {'-'*58}")
+        for s in iteration_stats:
+            print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}")
+
+    # Diff report
+    if args.report_diff and iteration_leak_sites:
+        print_diff_report(iteration_stats, iteration_leak_sites)
 
     return success
 
