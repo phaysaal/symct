@@ -502,8 +502,8 @@ def print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_time
     print(f"\n{'='*80}")
     print(f"LEAK DIFF REPORT")
     print(f"{'='*80}")
-    print(f"  {'Phase':<35s} {'Uniq':>5s}  {'Delta':>12s}  Details")
-    print(f"  {'-'*75}")
+    print(f"  {'Phase':<35s} {'Uniq':>5s}  {'Delta':>12s}")
+    print(f"  {'-'*55}")
 
     prev_sites = set()
     for i, (stat, sites) in enumerate(zip(iteration_stats, iteration_leak_sites)):
@@ -512,24 +512,16 @@ def print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_time
 
         if i == 0 or not prev_sites:
             delta_str = ""
-            detail = ""
         else:
             removed = prev_sites - sites
             added = sites - prev_sites
             delta_str = f"(-{len(removed)},+{len(added)})"
-            detail = ""
-            if removed:
-                detail += " Removed: " + "; ".join(sorted(removed))
-            if added:
-                detail += " Added: " + "; ".join(sorted(added))
 
-        # Truncate detail for display
-        if len(detail) > 120:
-            detail = detail[:117] + "..."
+        print(f"  {phase:<35s} {n:>5d}  {delta_str:>12s}")
 
-        print(f"  {phase:<35s} {n:>5d}  {delta_str:>12s}  {detail}")
+        prev_sites = sites if sites else prev_sites
 
-    print(f"  {'-'*75}")
+    print(f"  {'-'*55}")
 
     # Detailed list of all changes
     print(f"\n  Detailed changes per iteration:")
