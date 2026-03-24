@@ -310,6 +310,7 @@ def single_test(args):
             "unique_alerts": n_unique,
             "stubs": stubs_count,
             "hooked_bn": len(hooked_bn),
+            "hooked_bn_funcs": sorted(hooked_bn),
         })
 
         if args.report_diff and leaks_file and os.path.exists(leaks_file):
@@ -329,10 +330,11 @@ def single_test(args):
         print(f"\n{'='*60}")
         print(f"[PROGRESSIVE] Summary")
         print(f"{'='*60}")
-        print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}")
-        print(f"  {'-'*58}")
+        print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}  BN Functions Applied")
+        print(f"  {'-'*100}")
         for s in iteration_stats:
-            print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}")
+            bn_list = ", ".join(s.get('hooked_bn_funcs', []))
+            print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}  {bn_list}")
 
     # Diff report
     if args.report_diff and iteration_leak_sites:
@@ -1415,6 +1417,9 @@ def tree_test(args):
             phase = f"  {phase} (from {s['parent']})"
         dead_mark = " [DEAD]" if s.get('dead') else ""
         print(f"  {phase:<40s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}{dead_mark}")
+        bn_funcs = s.get('hooked_bn_funcs', [])
+        if bn_funcs:
+            print(f"    BN applied: {', '.join(bn_funcs)}")
     if dead_funcs:
         print(f"\n  Dead branches ({len(dead_funcs)}): {', '.join(sorted(dead_funcs))}")
 
@@ -2014,11 +2019,12 @@ def auto_test(args):
     print(f"\n{'='*60}")
     print(f"[AUTO] Summary")
     print(f"{'='*60}")
-    print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}")
-    print(f"  {'-'*58}")
+    print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}  BN Functions Applied")
+    print(f"  {'-'*100}")
     for s in iteration_stats:
-        print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}")
-    print(f"  {'-'*58}")
+        bn_list = ", ".join(s.get('hooked_bn_funcs', []))
+        print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}  {bn_list}")
+    print(f"  {'-'*100}")
     print(f"  {'No Stub (iter 0)':<20s} {'':<8s} {merged_counts['no_stub']:>8d}")
     print(f"  {'All Stubs':<20s} {'':<8s} {merged_counts['allstubs']:>8d}")
     print(f"  {'Progressive (all)':<20s} {'':<8s} {merged_counts['progressive']:>8d}")
