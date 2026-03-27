@@ -73,6 +73,7 @@ def parse_args():
     parser.add_argument("--build", action="store_true", help="Build the benchmark before running")
     parser.add_argument("--memlimit", type=int, default=16384, help="Memory limit in MB (default: 16384 = 16GB, 0 = unlimited)")
     parser.add_argument("--auto", action="store_true", help="Auto mode: iteratively discover and add bignum stubs")
+    parser.add_argument("--auto1", action="store_true", help="Auto1 mode: like auto but stub one leaked function per iteration")
     parser.add_argument("--tree", action="store_true", help="Tree mode: start with all stubs, progressively unstub to find leak sources")
     parser.add_argument("--dead-erase", action="store_true", help="In tree mode, auto-generate empty stubs for dead regions (no leaks, no BN) to speed up subsequent runs")
     parser.add_argument("--group", type=int, default=0, help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
@@ -98,6 +99,8 @@ def main():
 def drive_test(args):
     if args.tree:
         return tree_test(args)
+    elif args.auto1:
+        return auto1_test(args)
     elif args.auto:
         return auto_test(args)
     elif args.batch_file:
@@ -1741,6 +1744,17 @@ def tree_test(args):
     print(f"\n[TREE] Results written to {os.path.relpath(json_file, args.root)}")
 
     return success
+
+
+def auto1_test(args):
+    """Auto1 mode: like auto but stub one leaked function per iteration.
+
+    Delegates to auto_test with group forced to 1.
+    """
+    import copy
+    args1 = copy.copy(args)
+    args1.group = 1
+    return auto_test(args1)
 
 
 def auto_test(args):
