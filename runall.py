@@ -636,7 +636,7 @@ def print_stub_tables(tests, root):
         print()
 
 
-def run_test(test, root, timeout, memlimit, progressive=None, auto=True, auto1=False, group=0, tree=False, dead_erase=False, report_diff=False, parallel=False):
+def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0, tree=False, dead_erase=False, report_diff=False, parallel=False):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
         sys.executable, os.path.join(root, "runbench.py"),
@@ -654,8 +654,6 @@ def run_test(test, root, timeout, memlimit, progressive=None, auto=True, auto1=F
         cmd += ["--tree"]
         if dead_erase:
             cmd += ["--dead-erase"]
-    elif auto1:
-        cmd += ["--auto1"]
     elif auto:
         cmd += ["--auto"]
 
@@ -705,8 +703,6 @@ def main():
                         help="Enable progressive mode. Optionally specify a directory override.")
     parser.add_argument("--auto", action="store_true", default=True,
                         help="Enable auto mode for iterative stub discovery (default: on)")
-    parser.add_argument("--auto1", action="store_true",
-                        help="Auto1 mode: stub one leaked function per iteration")
     parser.add_argument("--no-auto", action="store_false", dest="auto",
                         help="Disable auto mode")
     parser.add_argument("--tree", action="store_true",
@@ -849,7 +845,7 @@ def main():
         label = t["label"]
         if args.missing and has_complete_logs(t, root):
             return (i, t, label, True, 0, "skipped", True)
-        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.auto1, args.group, args.tree, args.dead_erase, args.report_diff, args.parallel)
+        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group, args.tree, args.dead_erase, args.report_diff, args.parallel)
         return (i, t, label, success, elapsed, cmd_str, False)
 
     # Parallel or sequential execution
