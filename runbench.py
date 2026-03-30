@@ -990,17 +990,17 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, func_to_file, library
     if total_lines == 0:
         return None, {}, []
 
-    # Collect leaking BN functions that have a stub available
-    leak_funcs = set()
+    # For each leak chain, walk from the leaking function outward to find the
+    # nearest BN function that has a stub.  This handles cases like bin2bn
+    # (non-BN by prefix) whose nearest BN caller BN_bin2bn does have a stub.
+    leaking_bn = {}  # bn_func -> line_count
     for chain in leak_call_chains:
-        if chain:
-            leak_funcs.add(chain[0])
-
-    leaking_bn = {
-        f: func_line_counts.get(f, 0)
-        for f in leak_funcs
-        if is_bn_function(f, library) and f in func_to_file
-    }
+        for f in chain:
+            if is_bn_function(f, library) and f in func_to_file:
+                cnt = func_line_counts.get(f, 0)
+                if f not in leaking_bn or cnt > leaking_bn[f]:
+                    leaking_bn[f] = cnt
+                break  # nearest BN in this chain is sufficient
 
     # P1: leaking BN functions that are also dominant (>= threshold)
     if leaking_bn:
@@ -1855,19 +1855,31 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
     print()
     print(f"  BN dominance (>50%): {'YES' if bn_dominant else 'NO'} ({100*bn_lines/total_lines:.1f}%)")
 
+    # Build stub map before reporting so we can show BN targets for non-BN leakers
+    all_bn_funcs = {f for f in func_counts if is_bn_function(f, library)}
+    func_to_file = find_stub_files_for_auto(script_root, library, args.platform, all_bn_funcs, resolved_keylen)
+
     # Leaking functions not resolved by BN prefix
     leak_nonbn = {chain[0] for chain in leak_call_chains if chain
                   and not is_bn_function(chain[0], library)}
     if leak_nonbn:
+        # Build nearest-BN-caller map for each non-BN leaker
+        nonbn_to_bn = {}
+        for chain in leak_call_chains:
+            if not chain or is_bn_function(chain[0], library):
+                continue
+            leaker = chain[0]
+            for f in chain[1:]:
+                if is_bn_function(f, library) and f in func_to_file:
+                    nonbn_to_bn[leaker] = f
+                    break
         print()
         print(f"  Leaking non-BN functions ({len(leak_nonbn)}):")
         for f in sorted(leak_nonbn, key=lambda x: -func_counts.get(x, 0)):
             pct = 100 * func_counts.get(f, 0) / total_lines
-            print(f"    {f:40s}  {pct:5.1f}%")
-
-    # Resolve stubs
-    all_bn_funcs = {f for f in func_counts if is_bn_function(f, library)}
-    func_to_file = find_stub_files_for_auto(script_root, library, args.platform, all_bn_funcs, resolved_keylen)
+            target = nonbn_to_bn.get(f)
+            target_str = f"  -> stub {target}" if target else "  (no BN caller with stub)"
+            print(f"    {f:40s}  {pct:5.1f}%{target_str}")
 
     strategy, resolved, strat_info = resolve_auto_stubs(
         leak_call_chains, func_counts, func_to_file, library
