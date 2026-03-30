@@ -1015,10 +1015,12 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, func_to_file, library
             info = [(best, pct, "leaking-dominant")]
             return "P1", resolved, info
 
-    # P2: leaking BN functions (any share)
+    # P2: leaking BN functions (any share) — stub only the most dominant one
     if leaking_bn:
-        resolved = {f: func_to_file[f] for f in leaking_bn}
-        info = [(f, leaking_bn[f] / total_lines, "leaking") for f in sorted(leaking_bn)]
+        best = max(leaking_bn, key=lambda f: leaking_bn[f])
+        pct = leaking_bn[best] / total_lines
+        resolved = {best: func_to_file[best]}
+        info = [(best, pct, "leaking")]
         return "P2", resolved, info
 
     # P3: complexity fallback — stub BN functions until cumulative >= threshold
