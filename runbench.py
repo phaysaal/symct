@@ -850,6 +850,61 @@ CALL_STACK_ADDR_RE = re.compile(
 ADDR_ANNOTATION_RE = re.compile(
     r'\[sse:debug\]\s+0x([0-9a-fA-F]+)\s.*#\s*<([a-zA-Z0-9_]+)>'
 )
+RET_RE = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+ret\b')
+
+
+def compute_subtree_costs(lines):
+    """Compute per-function subtree analysis cost from log line spans.
+
+    For each function invocation starting at line N and ending at a ret
+    instruction at line M (annotated with the function's name), the subtree
+    cost is M - N.  This includes all nested calls, so it represents the total
+    analysis work that would be eliminated by stubbing the function.
+
+    Unfinished invocations (no matching annotated ret) are charged
+    len(lines) - N (they ran until the end of the log).
+
+    Cost is accumulated over all invocations of the same function.
+
+    Returns dict: func_name -> total subtree cost across all invocations.
+    """
+    from collections import defaultdict
+    costs = defaultdict(int)
+    stack = []  # list of (func_name, entry_lineno)
+    total = len(lines)
+
+    for lineno, line in enumerate(lines):
+        if '[sse:debug]' not in line:
+            continue
+
+        is_ret = bool(RET_RE.search(line))
+
+        # Extract function annotation (works for both regular and ret lines)
+        func_name = None
+        m = ADDR_ANNOTATION_RE.search(line)
+        if m:
+            func_name = m.group(2)
+        elif not is_ret:
+            m2 = FUNC_ANNOTATION_RE.search(line)
+            if m2:
+                func_name = m2.group(1)
+
+        if is_ret and func_name:
+            # Find topmost occurrence of this function on the stack and charge it
+            for k in range(len(stack) - 1, -1, -1):
+                if stack[k][0] == func_name:
+                    costs[func_name] += lineno - stack[k][1]
+                    del stack[k:]   # pop this frame and any above it
+                    break
+        elif not is_ret and func_name:
+            if not stack or stack[-1][0] != func_name:
+                stack.append((func_name, lineno))
+
+    # Charge unfinished invocations up to end of log
+    for func_name, entry_lineno in stack:
+        costs[func_name] += total - entry_lineno
+
+    return dict(costs)
 
 
 def parse_log_for_auto(log_file, library):
@@ -857,6 +912,9 @@ def parse_log_for_auto(log_file, library):
 
     Returns:
         func_line_counts: dict mapping function name -> number of [sse:debug] lines
+                          (annotation-based, no double-counting across functions)
+        subtree_costs:    dict mapping function name -> subtree analysis cost
+                          (line span M-N per invocation, includes all nested calls)
         leak_call_chains: list of lists of function names (deepest first) for each leak
         call_graph: dict mapping caller -> {callee: transition_count}
     """
@@ -966,19 +1024,27 @@ def parse_log_for_auto(log_file, library):
         else:
             i += 1
 
-    return func_line_counts, leak_call_chains, dict(call_graph)
+    subtree_costs = compute_subtree_costs(lines)
+    return func_line_counts, subtree_costs, leak_call_chains, dict(call_graph)
 
 
-def resolve_auto_stubs(leak_call_chains, func_line_counts, func_to_file, library):
+def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
+                       func_to_file, library):
     """Three-tier stub resolution for auto mode.
 
     P1 (dominant leaking BN): Among leaking BN functions with a stub, if any
-       has >= AUTO_P1_DOMINANCE_THRESHOLD trace share, stub the most dominant one.
+       has subtree cost >= AUTO_P1_DOMINANCE_THRESHOLD of total traced lines,
+       stub the most dominant one.
     P2 (any leaking BN): If none meet the dominance threshold but leaking BN
-       functions exist, stub all of them.
+       functions exist, stub the one with the highest subtree cost.
     P3 (complexity fallback): If no leaking function is a BN function, stub BN
-       functions (highest share first) until AUTO_P3_COMPLEXITY_THRESHOLD cumulative
-       share is reached.
+       functions (highest annotation-line share first, to avoid double-counting)
+       until AUTO_P3_COMPLEXITY_THRESHOLD cumulative share is reached.
+
+    P1/P2 use subtree_costs for ranking — a function's subtree cost reflects
+    the total analysis work eliminated by stubbing it (including nested calls).
+    P3 uses annotation-based func_line_counts to avoid double-counting when
+    accumulating multiple functions.
 
     Returns:
         strategy: "P1", "P2", "P3", or None
@@ -993,20 +1059,21 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, func_to_file, library
     # For each leak chain, walk from the leaking function outward to find the
     # nearest BN function that has a stub.  This handles cases like bin2bn
     # (non-BN by prefix) whose nearest BN caller BN_bin2bn does have a stub.
-    leaking_bn = {}  # bn_func -> line_count
+    # Use subtree cost for ranking: it reflects how much analysis is eliminated.
+    leaking_bn = {}  # bn_func -> subtree_cost
     for chain in leak_call_chains:
         for f in chain:
             if is_bn_function(f, library) and f in func_to_file:
-                cnt = func_line_counts.get(f, 0)
-                if f not in leaking_bn or cnt > leaking_bn[f]:
-                    leaking_bn[f] = cnt
+                cost = subtree_costs.get(f, func_line_counts.get(f, 0))
+                if f not in leaking_bn or cost > leaking_bn[f]:
+                    leaking_bn[f] = cost
                 break  # nearest BN in this chain is sufficient
 
-    # P1: leaking BN functions that are also dominant (>= threshold)
+    # P1: leaking BN functions that are also dominant (>= threshold by subtree cost)
     if leaking_bn:
         dominant = {
-            f: cnt for f, cnt in leaking_bn.items()
-            if cnt / total_lines >= AUTO_P1_DOMINANCE_THRESHOLD
+            f: cost for f, cost in leaking_bn.items()
+            if cost / total_lines >= AUTO_P1_DOMINANCE_THRESHOLD
         }
         if dominant:
             best = max(dominant, key=lambda f: dominant[f])
@@ -1023,7 +1090,7 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, func_to_file, library
         info = [(best, pct, "leaking")]
         return "P2", resolved, info
 
-    # P3: complexity fallback — stub BN functions until cumulative >= threshold
+    # P3: complexity fallback — use annotation counts to avoid double-counting
     cumulative = 0.0
     resolved = {}
     info = []
@@ -1770,11 +1837,12 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
     leak_times    : dict of site -> earliest time (for diff report)
     new_files     : set of stub file paths to add before the NEXT iteration
     func_to_file  : func -> stub file mapping (for further reporting)
-    func_counts   : func -> line count mapping
+    func_counts   : func -> annotation line count mapping
+    subtree_costs : func -> subtree analysis cost mapping
     """
     library = args.library
 
-    func_counts, leak_call_chains, _ = parse_log_for_auto(log_file, library)
+    func_counts, subtree_costs, leak_call_chains, _ = parse_log_for_auto(log_file, library)
     n_alerts = count_leaks_in_log(log_file)
 
     leaks_path = log_file.replace('.log', '.leaks')
@@ -1836,22 +1904,27 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
     print(f"  BN function lines  : {bn_lines} ({100*bn_lines/total_lines:.1f}%)")
     print(f"  Other lines        : {total_lines - bn_lines} ({100*(total_lines - bn_lines)/total_lines:.1f}%)")
     print()
-    print(f"  Top functions (75% cumulative share):")
-    cumulative = 0.0
+    # Sort by subtree cost (reflects analysis impact of stubbing); fall back to
+    # annotation count if subtree cost is unavailable.
+    print(f"  Top functions (75% annotation coverage, sorted by subtree cost):")
+    print(f"    {'Function':40s} {'SubCost':>8s} {'(%tot)':>7s}  {'AnnLines':>8s}  cum%")
+    ann_cumulative = 0.0
     top_count = 0
-    for f, c in sorted(func_counts.items(), key=lambda x: -x[1]):
-        if cumulative / total_lines >= 0.75:
+    for f in sorted(func_counts, key=lambda f: -(subtree_costs.get(f, func_counts[f]))):
+        if ann_cumulative / total_lines >= 0.75:
             break
-        cumulative += c
-        pct = 100 * c / total_lines
-        cum_pct = 100 * cumulative / total_lines
+        c = func_counts[f]
+        ann_cumulative += c
+        sc = subtree_costs.get(f, c)
+        pct = 100 * sc / total_lines
+        cum_pct = 100 * ann_cumulative / total_lines
         bn_mark = " [BN]" if is_bn_function(f, library) else ""
         leak_mark = " *** LEAK" if f in leak_bn_funcs else ""
-        print(f"    {f:40s} {c:8d}  ({pct:5.1f}%)  cum {cum_pct:5.1f}%{bn_mark}{leak_mark}")
+        print(f"    {f:40s} {sc:8d}  ({pct:5.1f}%)  {c:8d}  {cum_pct:5.1f}%{bn_mark}{leak_mark}")
         top_count += 1
     remaining = len(func_counts) - top_count
     if remaining > 0:
-        print(f"    ... and {remaining} more functions in remaining {100 - 100*cumulative/total_lines:.1f}%")
+        print(f"    ... and {remaining} more functions in remaining {100 - 100*ann_cumulative/total_lines:.1f}%")
 
     bn_dominant = bn_lines / total_lines > 0.50
     print()
@@ -1877,14 +1950,15 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
                     break
         print()
         print(f"  Leaking non-BN functions ({len(leak_nonbn)}):")
-        for f in sorted(leak_nonbn, key=lambda x: -func_counts.get(x, 0)):
-            pct = 100 * func_counts.get(f, 0) / total_lines
+        for f in sorted(leak_nonbn, key=lambda x: -(subtree_costs.get(x, func_counts.get(x, 0)))):
+            sc = subtree_costs.get(f, func_counts.get(f, 0))
+            pct = 100 * sc / total_lines
             target = nonbn_to_bn.get(f)
             target_str = f"  -> stub {target}" if target else "  (no BN caller with stub)"
             print(f"    {f:40s}  {pct:5.1f}%{target_str}")
 
     strategy, resolved, strat_info = resolve_auto_stubs(
-        leak_call_chains, func_counts, func_to_file, library
+        leak_call_chains, func_counts, subtree_costs, func_to_file, library
     )
 
     print()
