@@ -461,6 +461,7 @@ BN_PREFIXES = {
 # Auto mode stub resolution thresholds (easy to tweak)
 AUTO_P1_DOMINANCE_THRESHOLD = 0.25  # P1: leaking BN function must have >=25% subtree share
 AUTO_P3_SUBTREE_THRESHOLD   = 0.10  # P3: stub deepest BN function with >=10% subtree share
+AUTO_DISPLAY_MIN_PCT        = 0.05  # report: show functions with subtree cost >= 5% of total
 
 FUNC_ANNOTATION_RE = re.compile(r'#\s*<([a-zA-Z0-9_]+)>')
 AUTO_LEAK_RE = re.compile(
@@ -922,16 +923,15 @@ HOOK_AT_RE = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+hook at\s+<([a-zA-Z0-
 def compute_subtree_costs(lines):
     """Compute per-function subtree analysis cost from log line spans.
 
-    For each function invocation, cost = exit_line - entry_line, including
-    all nested calls.  Exit is detected by three mechanisms (annotation is
-    the ground truth for balancing):
+    Push function F when its annotation is first seen and F is not already on
+    the stack.  Pop only on explicit `ret # <F>` (or end-of-log).
 
-      1. Explicit `ret # <func>` — annotated return instruction.
-      2. `hook at <func>` — stubbed function: enters and immediately exits on
-         the same line (no body executed); treated as entry+exit, cost = 0.
-      3. Implicit return — when the annotation changes back to an ancestor
-         already on the stack (covers `pop; ret`, bare `pop`, tail calls, and
-         any other pattern that doesn't emit an annotated ret).
+    Annotation returning to an ancestor already on the stack does NOT pop the
+    intermediate frames — in BINSEC's symbolic execution, those functions are
+    still live (path exploration may interleave annotations).
+
+    `hook at <F>` is never pushed (it's a zero-cost BINSEC action, not a real
+    call frame).
 
     Unfinished invocations still on the stack at end-of-log are charged
     len(lines) - entry_line.
@@ -942,7 +942,8 @@ def compute_subtree_costs(lines):
     """
     from collections import defaultdict
     costs = defaultdict(int)
-    stack = []  # list of (func_name, entry_lineno)
+    stack = []           # list of (func_name, entry_lineno)
+    stack_funcs = set()  # O(1) membership test
     total = len(lines)
 
     for lineno, line in enumerate(lines):
@@ -964,49 +965,24 @@ def compute_subtree_costs(lines):
                 func_name = m2.group(1)
 
         if is_ret and func_name:
-            # Explicit annotated ret: pop topmost matching frame.
+            # Explicit annotated ret: pop topmost matching frame and everything
+            # above it (tail-called frames that never got an explicit ret).
             for k in range(len(stack) - 1, -1, -1):
                 if stack[k][0] == func_name:
                     costs[func_name] += lineno - stack[k][1]
                     del stack[k:]
+                    stack_funcs = {f for f, _ in stack}
                     break
 
         elif is_hook:
-            # hook at <Z> # <X>: BINSEC is executing a stub for Z at this address.
-            # Do NOT push or pop anything.
-            #
-            # Two cases, both handled by the implicit-return logic in the
-            # normal-instruction branch when the next annotation is seen:
-            #   - Hook is the entire execution of X (next annotation = caller Y):
-            #     implicit return pops X when Y is seen.
-            #   - Hook is called FROM WITHIN X (next annotation = X again):
-            #     X stays on the stack and continues unmodified.
+            # hook at <Z>: BINSEC stub or debug hook — never push.
             pass
 
-        elif func_name:
-            # Normal instruction.
-            if stack and stack[-1][0] == func_name:
-                pass  # still in the same function, nothing to do
-
-            else:
-                # Check whether func_name is an ancestor already on the stack.
-                found_at = -1
-                for k in range(len(stack) - 1, -1, -1):
-                    if stack[k][0] == func_name:
-                        found_at = k
-                        break
-
-                if found_at >= 0:
-                    # Implicit returns: pop every frame above the ancestor and
-                    # charge each with (current_line - its_entry_line).
-                    for k in range(len(stack) - 1, found_at, -1):
-                        f_name, f_entry = stack[k]
-                        costs[f_name] += lineno - f_entry
-                    del stack[found_at + 1:]
-                    # The ancestor resumes; no push needed.
-                else:
-                    # Genuinely new function entry.
-                    stack.append((func_name, lineno))
+        elif func_name and func_name not in stack_funcs:
+            # First time we see this function; push it.
+            stack.append((func_name, lineno))
+            stack_funcs.add(func_name)
+        # else: func_name already on stack (ancestor or top) — nothing to do.
 
     # Charge all invocations still open at end of log.
     for func_name, entry_lineno in stack:
@@ -2010,27 +1986,28 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
     print(f"  BN function lines  : {bn_lines} ({100*bn_lines/total_lines:.1f}%)")
     print(f"  Other lines        : {total_lines - bn_lines} ({100*(total_lines - bn_lines)/total_lines:.1f}%)")
     print()
-    # Sort by subtree cost (reflects analysis impact of stubbing); fall back to
-    # annotation count if subtree cost is unavailable.
-    print(f"  Top functions (75% annotation coverage, sorted by subtree cost):")
-    print(f"    {'Function':40s} {'SubCost':>8s} {'(%tot)':>7s}  {'AnnLines':>8s}  cum%")
-    ann_cumulative = 0.0
+    # Show all functions whose subtree cost >= AUTO_DISPLAY_MIN_PCT of total,
+    # sorted descending.  Subtree costs double-count (ancestor includes
+    # descendants) so cumulative accumulation is meaningless; a per-function
+    # minimum threshold gives a stable, predictable list that always includes
+    # any P3 candidate and any wrapper with significant analysis weight.
+    min_sc = total_lines * AUTO_DISPLAY_MIN_PCT
+    print(f"  Functions with subtree cost >= {AUTO_DISPLAY_MIN_PCT:.0%} of total (sorted by subtree cost):")
+    print(f"    {'Function':40s} {'SubCost':>8s} {'(%tot)':>7s}  {'AnnLines':>8s}")
     top_count = 0
     for f in sorted(func_counts, key=lambda f: subtree_costs.get(f, func_counts[f]), reverse=True):
-        if ann_cumulative / total_lines >= 0.75:
+        sc = subtree_costs.get(f, func_counts[f])
+        if sc < min_sc:
             break
         c = func_counts[f]
-        ann_cumulative += c
-        sc = subtree_costs.get(f, c)
         pct = 100 * sc / total_lines
-        cum_pct = 100 * ann_cumulative / total_lines
         bn_mark = " [BN]" if is_bn_function(f, library) else ""
         leak_mark = " *** LEAK" if f in leak_bn_funcs else ""
-        print(f"    {f:40s} {sc:8d}  ({pct:5.1f}%)  {c:8d}  {cum_pct:5.1f}%{bn_mark}{leak_mark}")
+        print(f"    {f:40s} {sc:8d}  ({pct:5.1f}%)  {c:8d}{bn_mark}{leak_mark}")
         top_count += 1
     remaining = len(func_counts) - top_count
     if remaining > 0:
-        print(f"    ... and {remaining} more functions in remaining {100 - 100*ann_cumulative/total_lines:.1f}%")
+        print(f"    ... and {remaining} more functions below {AUTO_DISPLAY_MIN_PCT:.0%}")
 
     bn_dominant = bn_lines / total_lines > 0.50
     print()
