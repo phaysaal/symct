@@ -89,9 +89,74 @@ def parse_args():
 # ============================================================================ 
 
 def main():
+    if '--analyze-log' in sys.argv:
+        _analyze_log_cmd()
+        return
     args = parse_args()
     if not drive_test(args):
         sys.exit(1)
+
+
+def _analyze_log_cmd():
+    """Standalone log analysis: parse and display the analysis/decision report
+    for one or more existing BINSEC log files without running BINSEC."""
+    parser = argparse.ArgumentParser(
+        description="Analyze existing BINSEC log file(s) — show analysis and stub-decision report",
+        prog=f"{os.path.basename(sys.argv[0])} --analyze-log",
+    )
+    parser.add_argument("--analyze-log", metavar="LOG", nargs="+", required=True,
+                        help="Path(s) to BINSEC log file(s) to analyze")
+    parser.add_argument("--library", required=True,
+                        choices=[l.value for l in Library],
+                        help="Library (openssl, bearssl, wolfssl, mbedtls)")
+    parser.add_argument("--platform", default=Platform.X86.value,
+                        choices=[p.value for p in Platform])
+    parser.add_argument("--root", default=".",
+                        help="Root directory (for locating binsec/ stub files)")
+    parser.add_argument("--keylen", type=int, default=0,
+                        help="Key length for stub compatibility filtering (0 = any)")
+    parser.add_argument("--iteration", type=int, default=None,
+                        help="Override iteration number (auto-detected from filename if omitted)")
+    args = parser.parse_args()
+
+    # Build a minimal Namespace that satisfies _auto_iter_report
+    import argparse as _ap
+    fake_args = _ap.Namespace(
+        library=args.library,
+        platform=args.platform,
+        root=os.path.abspath(args.root),
+        group=0,
+        report_diff=False,
+        dead_erase=False,
+        optimization="",
+        timeout=0,
+    )
+    script_root = f"{fake_args.root}/binsec/"
+
+    for log_file in args.analyze_log:
+        if not os.path.exists(log_file):
+            print(f"Error: log file not found: {log_file}", file=sys.stderr)
+            continue
+
+        # Auto-detect iteration from filename (e.g. rsa_openssl_auto_2.log → 2)
+        iteration = args.iteration
+        if iteration is None:
+            m = re.search(r'_auto_(\d+)', os.path.basename(log_file))
+            iteration = int(m.group(1)) if m else 0
+
+        print(f"\n{'='*60}")
+        print(f"[ANALYZE] {os.path.relpath(log_file)}  (iteration {iteration})")
+        print(f"{'='*60}")
+
+        _auto_iter_report(
+            iteration, log_file,
+            binary_path=None,
+            accumulated_stubs=set(),
+            args=fake_args,
+            script_root=script_root,
+            resolved_keylen=args.keylen,
+            generate_leaks=False,
+        )
 
 # ============================================================================ 
 # Test Driver Functions
