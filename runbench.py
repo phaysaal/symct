@@ -916,39 +916,63 @@ CALL_STACK_ADDR_RE = re.compile(
 ADDR_ANNOTATION_RE = re.compile(
     r'\[sse:debug\]\s+0x([0-9a-fA-F]+)\s.*#\s*<([a-zA-Z0-9_]+)>'
 )
-RET_RE = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+ret\b')
-HOOK_AT_RE = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+hook at\s+<([a-zA-Z0-9_]+)>')
+RET_RE          = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+ret\b')
+HOOK_AT_RE      = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+hook at\s+<([a-zA-Z0-9_]+)>')
+CUT_PATH_RE     = re.compile(r'\[sse:debug\]\s+Cut path')
+COMPLETED_CUT_RE = re.compile(r'completed/cut paths\s+(\d+)')
 
 
 def compute_subtree_costs(lines):
     """Compute per-function subtree analysis cost from log line spans.
 
-    Push function F when its annotation is first seen and F is not already on
-    the stack.  Pop only on explicit `ret # <F>` (or end-of-log).
+    Single-path logs (completed/cut paths == 0):
+      Use implicit-return heuristic: when annotation transitions to an ancestor
+      already on the stack, pop all intermediate frames and charge them up to
+      the current line.  This handles pop+ret, tail calls, and other patterns
+      that don't emit an explicit annotated ret.
 
-    Annotation returning to an ancestor already on the stack does NOT pop the
-    intermediate frames — in BINSEC's symbolic execution, those functions are
-    still live (path exploration may interleave annotations).
+    Multi-path logs (completed/cut paths > 0):
+      Phase 1 — before the first 'Cut path' line: same as single-path
+        (we are still tracing the first path; annotation-to-ancestor is a real
+        return).
+      Phase 2 — after the first 'Cut path' line: annotation-to-ancestor is
+        NOT treated as a return (BINSEC is replaying a different branch from
+        somewhere inside the already-popped call tree).  Instead, if F is not
+        on the stack we simply re-push it (new path entry); if it is already
+        on the stack we do nothing.
 
-    `hook at <F>` is never pushed (it's a zero-cost BINSEC action, not a real
-    call frame).
+    In both modes:
+      - `ret # <F>`: pop F and every frame above it, charging each.
+      - `hook at <F>`: never pushed (stub or debug hook, not a real frame).
+      - End-of-log: charge all remaining frames total_lines - entry_line.
 
-    Unfinished invocations still on the stack at end-of-log are charged
-    len(lines) - entry_line.
-
-    Cost is accumulated over all invocations of the same function.
+    Cost is accumulated (+=) over all invocations / path explorations.
 
     Returns dict: func_name -> total subtree cost across all invocations.
     """
     from collections import defaultdict
+
+    # Determine whether this log contains multiple paths.
+    multi_path = False
+    for line in lines:
+        m = COMPLETED_CUT_RE.search(line)
+        if m:
+            multi_path = int(m.group(1)) > 0
+            break
+
     costs = defaultdict(int)
     stack = []           # list of (func_name, entry_lineno)
     stack_funcs = set()  # O(1) membership test
     total = len(lines)
+    after_first_cut = False  # only relevant when multi_path=True
 
     for lineno, line in enumerate(lines):
         if '[sse:debug]' not in line:
             continue
+
+        # Track phase boundary for multi-path logs.
+        if multi_path and not after_first_cut and CUT_PATH_RE.search(line):
+            after_first_cut = True
 
         is_ret  = bool(RET_RE.search(line))
         is_hook = bool(HOOK_AT_RE.search(line))
@@ -965,24 +989,42 @@ def compute_subtree_costs(lines):
                 func_name = m2.group(1)
 
         if is_ret and func_name:
-            # Explicit annotated ret: pop topmost matching frame and everything
-            # above it (tail-called frames that never got an explicit ret).
+            # Explicit annotated ret: pop F and everything above it, charging
+            # each frame up to the current line.
             for k in range(len(stack) - 1, -1, -1):
                 if stack[k][0] == func_name:
+                    for j in range(len(stack) - 1, k, -1):
+                        costs[stack[j][0]] += lineno - stack[j][1]
                     costs[func_name] += lineno - stack[k][1]
                     del stack[k:]
                     stack_funcs = {f for f, _ in stack}
                     break
+            # If F not found on stack: a ret for an already-closed frame
+            # (path 2 returning a function popped in path 1) — ignore.
 
         elif is_hook:
             # hook at <Z>: BINSEC stub or debug hook — never push.
             pass
 
-        elif func_name and func_name not in stack_funcs:
-            # First time we see this function; push it.
-            stack.append((func_name, lineno))
-            stack_funcs.add(func_name)
-        # else: func_name already on stack (ancestor or top) — nothing to do.
+        elif func_name:
+            if func_name in stack_funcs:
+                # F is already live on the stack.
+                if not (multi_path and after_first_cut):
+                    # Single-path / phase-1: annotation returning to ancestor
+                    # means the intermediate frames have implicitly returned.
+                    for k in range(len(stack) - 1, -1, -1):
+                        if stack[k][0] == func_name:
+                            for j in range(len(stack) - 1, k, -1):
+                                costs[stack[j][0]] += lineno - stack[j][1]
+                            del stack[k + 1:]
+                            stack_funcs = {f for f, _ in stack}
+                            break
+                # else phase-2: F is already on the stack from a prior path
+                # exploration; nothing to do.
+            else:
+                # F not on stack: new call (phase 1) or new path entry (phase 2).
+                stack.append((func_name, lineno))
+                stack_funcs.add(func_name)
 
     # Charge all invocations still open at end of log.
     for func_name, entry_lineno in stack:
@@ -1165,12 +1207,13 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
             info = [(best, pct, "leaking-dominant")]
             return "P1", resolved, info
 
-    # P2: leaking BN functions (any share) — stub only the most dominant one
+    # P2: stub all leaking BN functions
     if leaking_bn:
-        best = max(leaking_bn, key=lambda f: leaking_bn[f])
-        pct = leaking_bn[best] / total_lines
-        resolved = {best: func_to_file[best]}
-        info = [(best, pct, "leaking")]
+        resolved = {f: func_to_file[f] for f in leaking_bn}
+        info = [
+            (f, leaking_bn[f] / total_lines, "leaking")
+            for f in sorted(leaking_bn, key=lambda f: leaking_bn[f], reverse=True)
+        ]
         return "P2", resolved, info
 
     # P3: complexity fallback — stub the single deepest (lowest subtree cost)
@@ -2050,7 +2093,7 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
         print(f"  Strategy: P1 (dominant leaking BN, threshold={AUTO_P1_DOMINANCE_THRESHOLD:.0%})")
         print(f"    {func:40s}  {100*pct:5.1f}%  [leaking + dominant]")
     elif strategy == "P2":
-        print(f"  Strategy: P2 (leaking BN functions, {len(resolved)} found)")
+        print(f"  Strategy: P2 (leaking BN functions, {len(strat_info)} found)")
         for func, pct, _ in strat_info:
             print(f"    {func:40s}  {100*pct:5.1f}%  [leaking]")
     elif strategy == "P3":
