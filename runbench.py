@@ -851,7 +851,7 @@ ADDR_ANNOTATION_RE = re.compile(
     r'\[sse:debug\]\s+0x([0-9a-fA-F]+)\s.*#\s*<([a-zA-Z0-9_]+)>'
 )
 RET_RE = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+ret\b')
-HOOK_AT_RE = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+hook at\b')
+HOOK_AT_RE = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+hook at\s+<([a-zA-Z0-9_]+)>')
 
 
 def compute_subtree_costs(lines):
