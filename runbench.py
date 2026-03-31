@@ -394,8 +394,8 @@ BN_PREFIXES = {
 }
 
 # Auto mode stub resolution thresholds (easy to tweak)
-AUTO_P1_DOMINANCE_THRESHOLD = 0.25   # P1: leaking BN function must have >=25% trace share
-AUTO_P3_COMPLEXITY_THRESHOLD = 0.33  # P3: stub BN functions until >=33% cumulative share
+AUTO_P1_DOMINANCE_THRESHOLD = 0.25  # P1: leaking BN function must have >=25% subtree share
+AUTO_P3_SUBTREE_THRESHOLD   = 0.10  # P3: stub deepest BN function with >=10% subtree share
 
 FUNC_ANNOTATION_RE = re.compile(r'#\s*<([a-zA-Z0-9_]+)>')
 AUTO_LEAK_RE = re.compile(
@@ -906,16 +906,17 @@ def compute_subtree_costs(lines):
                     del stack[k:]
                     break
 
-        elif is_hook and func_name:
-            # Stubbed function: this single line is its entire execution.
-            # If somehow already on the stack (shouldn't happen normally),
-            # pop and charge; otherwise just don't push it.
-            for k in range(len(stack) - 1, -1, -1):
-                if stack[k][0] == func_name:
-                    costs[func_name] += lineno - stack[k][1]
-                    del stack[k:]
-                    break
-            # Do NOT push — the next instruction returns to the caller.
+        elif is_hook:
+            # hook at <Z> # <X>: BINSEC is executing a stub for Z at this address.
+            # Do NOT push or pop anything.
+            #
+            # Two cases, both handled by the implicit-return logic in the
+            # normal-instruction branch when the next annotation is seen:
+            #   - Hook is the entire execution of X (next annotation = caller Y):
+            #     implicit return pops X when Y is seen.
+            #   - Hook is called FROM WITHIN X (next annotation = X again):
+            #     X stays on the stack and continues unmodified.
+            pass
 
         elif func_name:
             # Normal instruction.
@@ -1079,14 +1080,13 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
        stub the most dominant one.
     P2 (any leaking BN): If none meet the dominance threshold but leaking BN
        functions exist, stub the one with the highest subtree cost.
-    P3 (complexity fallback): If no leaking function is a BN function, stub BN
-       functions (highest annotation-line share first, to avoid double-counting)
-       until AUTO_P3_COMPLEXITY_THRESHOLD cumulative share is reached.
+    P3 (complexity fallback): If no leaking function is a BN function, find all
+       stubbable BN functions whose subtree cost >= AUTO_P3_SUBTREE_THRESHOLD
+       and stub the one with the MINIMUM subtree cost (deepest in the call tree).
+       Stubbing the deepest costly function is more targeted: it eliminates that
+       function's subtree while keeping its callers visible for further analysis.
 
-    P1/P2 use subtree_costs for ranking — a function's subtree cost reflects
-    the total analysis work eliminated by stubbing it (including nested calls).
-    P3 uses annotation-based func_line_counts to avoid double-counting when
-    accumulating multiple functions.
+    All tiers use subtree_costs for ranking.
 
     Returns:
         strategy: "P1", "P2", "P3", or None
@@ -1132,22 +1132,21 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
         info = [(best, pct, "leaking")]
         return "P2", resolved, info
 
-    # P3: complexity fallback — use annotation counts to avoid double-counting
-    cumulative = 0.0
-    resolved = {}
-    info = []
-    for f, cnt in sorted(func_line_counts.items(), key=lambda x: -x[1]):
+    # P3: complexity fallback — stub the single deepest (lowest subtree cost)
+    # BN function that still exceeds the threshold.  Picking the minimum
+    # subtree cost avoids hiding an outer caller that we still want to see.
+    candidates = {}
+    for f in func_line_counts:
         if not is_bn_function(f, library) or f not in func_to_file:
             continue
-        pct = cnt / total_lines
-        resolved[f] = func_to_file[f]
-        info.append((f, pct, "complexity"))
-        cumulative += pct
-        if cumulative >= AUTO_P3_COMPLEXITY_THRESHOLD:
-            break
+        cost = subtree_costs.get(f, func_line_counts.get(f, 0))
+        if cost / total_lines >= AUTO_P3_SUBTREE_THRESHOLD:
+            candidates[f] = cost
 
-    if resolved and cumulative >= AUTO_P3_COMPLEXITY_THRESHOLD:
-        return "P3", resolved, info
+    if candidates:
+        best = min(candidates, key=lambda f: candidates[f])
+        pct = candidates[best] / total_lines
+        return "P3", {best: func_to_file[best]}, [(best, pct, "complexity")]
 
     return None, {}, []
 
@@ -2013,12 +2012,11 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
         for func, pct, _ in strat_info:
             print(f"    {func:40s}  {100*pct:5.1f}%  [leaking]")
     elif strategy == "P3":
-        cum_p3 = sum(pct for _, pct, _ in strat_info)
-        print(f"  Strategy: P3 (complexity fallback, threshold={AUTO_P3_COMPLEXITY_THRESHOLD:.0%}, cumulative={100*cum_p3:.1f}%)")
-        for func, pct, _ in strat_info:
-            print(f"    {func:40s}  {100*pct:5.1f}%")
+        func, pct, _ = strat_info[0]
+        print(f"  Strategy: P3 (deepest BN above threshold={AUTO_P3_SUBTREE_THRESHOLD:.0%})")
+        print(f"    {func:40s}  {100*pct:5.1f}%  [deepest above threshold]")
     else:
-        print(f"  No stubs found (no leaking BN functions, no BN function reaches {AUTO_P3_COMPLEXITY_THRESHOLD:.0%} share).")
+        print(f"  No stubs found (no leaking BN functions, no BN function reaches {AUTO_P3_SUBTREE_THRESHOLD:.0%} subtree share).")
         print(f"  {'─'*56}")
         return stats, leaks_path, leak_sites, leak_times, set(), func_to_file, func_counts
 
