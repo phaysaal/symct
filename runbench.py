@@ -851,18 +851,25 @@ ADDR_ANNOTATION_RE = re.compile(
     r'\[sse:debug\]\s+0x([0-9a-fA-F]+)\s.*#\s*<([a-zA-Z0-9_]+)>'
 )
 RET_RE = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+ret\b')
+HOOK_AT_RE = re.compile(r'\[sse:debug\]\s+0x[0-9a-fA-F]+\s+hook at\b')
 
 
 def compute_subtree_costs(lines):
     """Compute per-function subtree analysis cost from log line spans.
 
-    For each function invocation starting at line N and ending at a ret
-    instruction at line M (annotated with the function's name), the subtree
-    cost is M - N.  This includes all nested calls, so it represents the total
-    analysis work that would be eliminated by stubbing the function.
+    For each function invocation, cost = exit_line - entry_line, including
+    all nested calls.  Exit is detected by three mechanisms (annotation is
+    the ground truth for balancing):
 
-    Unfinished invocations (no matching annotated ret) are charged
-    len(lines) - N (they ran until the end of the log).
+      1. Explicit `ret # <func>` — annotated return instruction.
+      2. `hook at <func>` — stubbed function: enters and immediately exits on
+         the same line (no body executed); treated as entry+exit, cost = 0.
+      3. Implicit return — when the annotation changes back to an ancestor
+         already on the stack (covers `pop; ret`, bare `pop`, tail calls, and
+         any other pattern that doesn't emit an annotated ret).
+
+    Unfinished invocations still on the stack at end-of-log are charged
+    len(lines) - entry_line.
 
     Cost is accumulated over all invocations of the same function.
 
@@ -877,9 +884,11 @@ def compute_subtree_costs(lines):
         if '[sse:debug]' not in line:
             continue
 
-        is_ret = bool(RET_RE.search(line))
+        is_ret  = bool(RET_RE.search(line))
+        is_hook = bool(HOOK_AT_RE.search(line))
 
-        # Extract function annotation (works for both regular and ret lines)
+        # Extract function annotation — ADDR_ANNOTATION_RE covers all cases
+        # including `ret # <func>` and `hook at <func> # <func>`.
         func_name = None
         m = ADDR_ANNOTATION_RE.search(line)
         if m:
@@ -890,17 +899,50 @@ def compute_subtree_costs(lines):
                 func_name = m2.group(1)
 
         if is_ret and func_name:
-            # Find topmost occurrence of this function on the stack and charge it
+            # Explicit annotated ret: pop topmost matching frame.
             for k in range(len(stack) - 1, -1, -1):
                 if stack[k][0] == func_name:
                     costs[func_name] += lineno - stack[k][1]
-                    del stack[k:]   # pop this frame and any above it
+                    del stack[k:]
                     break
-        elif not is_ret and func_name:
-            if not stack or stack[-1][0] != func_name:
-                stack.append((func_name, lineno))
 
-    # Charge unfinished invocations up to end of log
+        elif is_hook and func_name:
+            # Stubbed function: this single line is its entire execution.
+            # If somehow already on the stack (shouldn't happen normally),
+            # pop and charge; otherwise just don't push it.
+            for k in range(len(stack) - 1, -1, -1):
+                if stack[k][0] == func_name:
+                    costs[func_name] += lineno - stack[k][1]
+                    del stack[k:]
+                    break
+            # Do NOT push — the next instruction returns to the caller.
+
+        elif func_name:
+            # Normal instruction.
+            if stack and stack[-1][0] == func_name:
+                pass  # still in the same function, nothing to do
+
+            else:
+                # Check whether func_name is an ancestor already on the stack.
+                found_at = -1
+                for k in range(len(stack) - 1, -1, -1):
+                    if stack[k][0] == func_name:
+                        found_at = k
+                        break
+
+                if found_at >= 0:
+                    # Implicit returns: pop every frame above the ancestor and
+                    # charge each with (current_line - its_entry_line).
+                    for k in range(len(stack) - 1, found_at, -1):
+                        f_name, f_entry = stack[k]
+                        costs[f_name] += lineno - f_entry
+                    del stack[found_at + 1:]
+                    # The ancestor resumes; no push needed.
+                else:
+                    # Genuinely new function entry.
+                    stack.append((func_name, lineno))
+
+    # Charge all invocations still open at end of log.
     for func_name, entry_lineno in stack:
         costs[func_name] += total - entry_lineno
 
@@ -1910,7 +1952,7 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
     print(f"    {'Function':40s} {'SubCost':>8s} {'(%tot)':>7s}  {'AnnLines':>8s}  cum%")
     ann_cumulative = 0.0
     top_count = 0
-    for f in sorted(func_counts, key=lambda f: -(subtree_costs.get(f, func_counts[f]))):
+    for f in sorted(func_counts, key=lambda f: subtree_costs.get(f, func_counts[f]), reverse=True):
         if ann_cumulative / total_lines >= 0.75:
             break
         c = func_counts[f]
