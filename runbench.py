@@ -73,6 +73,8 @@ def parse_args():
     parser.add_argument("--build", action="store_true", help="Build the benchmark before running")
     parser.add_argument("--memlimit", type=int, default=16384, help="Memory limit in MB (default: 16384 = 16GB, 0 = unlimited)")
     parser.add_argument("--auto", action="store_true", help="Auto mode: iteratively discover and add bignum stubs")
+    parser.add_argument("--newprimeall", action="store_true", help="In auto mode, use the Terminal Leakers strategy (stub all terminal leakers)")
+    parser.add_argument("--newprimeone", action="store_true", help="In auto mode, use the Terminal Leakers strategy (stub one terminal leaker per iteration)")
     parser.add_argument("--resume-from", type=int, default=0, metavar="N",
                         help="In auto mode, skip to iteration N by replaying existing logs for iterations 0..N-1")
     parser.add_argument("--tree", action="store_true", help="Tree mode: start with all stubs, progressively unstub to find leak sources")
@@ -1155,9 +1157,16 @@ def parse_log_for_auto(log_file, library):
 
 
 def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
-                       func_to_file, library):
+                       func_to_file, library, newprimeall=False, newprimeone=False):
     """Three-tier stub resolution for auto mode.
 
+    Terminal Leaker Strategies (overrides P1/P2):
+    - newprimeall: identify all terminal leakers C = A - B and stub them all.
+    - newprimeone: same as above but stub only the single highest-cost leaker from C.
+    where A = set of leaking BN functions (leaf of at least one chain)
+          B = set of BN functions that call ANY function in set A.
+
+    Standard Tiers:
     P1 (dominant leaking BN): Among leaking BN functions with a stub, if any
        has subtree cost >= AUTO_P1_DOMINANCE_THRESHOLD of total traced lines,
        stub the most dominant one.
@@ -1172,14 +1181,52 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
     All tiers use subtree_costs for ranking.
 
     Returns:
-        strategy: "P1", "P2", "P3", or None
+        strategy: "P1", "P2", "P3", or "NewPrimeAll"/"NewPrimeOne", or None
         resolved: dict of func -> stub_file
         info: list of (func, pct, role) for display ("leaking-dominant",
               "leaking", or "complexity")
+        excluded: list of functions excluded from A (A intersect B)
     """
     total_lines = sum(func_line_counts.values())
     if total_lines == 0:
-        return None, {}, []
+        return None, {}, [], []
+
+    # Identify sets for NewPrime strategies
+    if newprimeall or newprimeone:
+        # A = set of leaking BN functions (leaf of at least one chain) that have a stub
+        A = set()
+        for chain in leak_call_chains:
+            if chain and is_bn_function(chain[0], library) and chain[0] in func_to_file:
+                A.add(chain[0])
+
+        # B = set of BN functions that call ANY function in set A
+        B = set()
+        for chain in leak_call_chains:
+            if len(chain) > 1:
+                leaker = chain[0]
+                caller = chain[1]
+                # If immediate caller is BN and callee is a terminal leaker candidate (A)
+                if leaker in A and is_bn_function(caller, library) and caller in func_to_file:
+                    B.add(caller)
+
+        # C = terminal leakers
+        C = A - B
+        excluded = sorted(list(A & B))
+
+        if C:
+            if newprimeall:
+                resolved = {f: func_to_file[f] for f in C}
+                info = [
+                    (f, subtree_costs.get(f, func_line_counts.get(f, 0)) / total_lines, "newprime-all")
+                    for f in sorted(C, key=lambda f: subtree_costs.get(f, func_line_counts.get(f, 0)), reverse=True)
+                ]
+                return "NewPrimeAll", resolved, info, excluded
+            else: # newprimeone
+                best = max(C, key=lambda f: subtree_costs.get(f, func_line_counts.get(f, 0)))
+                pct = subtree_costs.get(best, func_line_counts.get(best, 0)) / total_lines
+                resolved = {best: func_to_file[best]}
+                info = [(best, pct, "newprime-one")]
+                return "NewPrimeOne", resolved, info, excluded
 
     # For each leak chain, walk from the leaking function outward to find the
     # nearest BN function that has a stub.  This handles cases like bin2bn
@@ -1205,16 +1252,16 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
             pct = dominant[best] / total_lines
             resolved = {best: func_to_file[best]}
             info = [(best, pct, "leaking-dominant")]
-            return "P1", resolved, info
+            return "P1", resolved, info, []
 
-    # P2: stub all leaking BN functions
-    if leaking_bn:
+    # P2: stub all leaking BN functions (skipped if newprime mode is active)
+    if leaking_bn and not (newprimeall or newprimeone):
         resolved = {f: func_to_file[f] for f in leaking_bn}
         info = [
             (f, leaking_bn[f] / total_lines, "leaking")
             for f in sorted(leaking_bn, key=lambda f: leaking_bn[f], reverse=True)
         ]
-        return "P2", resolved, info
+        return "P2", resolved, info, []
 
     # P3: complexity fallback — stub the single deepest (lowest subtree cost)
     # BN function that still exceeds the threshold.  Picking the minimum
@@ -1230,9 +1277,9 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
     if candidates:
         best = min(candidates, key=lambda f: candidates[f])
         pct = candidates[best] / total_lines
-        return "P3", {best: func_to_file[best]}, [(best, pct, "complexity")]
+        return "P3", {best: func_to_file[best]}, [(best, pct, "complexity")], []
 
-    return None, {}, []
+    return None, {}, [], []
 
 
 def find_stub_files_for_auto(binsec_root, library, platform, target_funcs, keylen=0):
@@ -2083,12 +2130,25 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
             target_str = f"  -> stub {target}" if target else "  (no BN caller with stub)"
             print(f"    {f:40s}  {pct:5.1f}%{target_str}")
 
-    strategy, resolved, strat_info = resolve_auto_stubs(
-        leak_call_chains, func_counts, subtree_costs, func_to_file, library
+    strategy, resolved, strat_info, excluded = resolve_auto_stubs(
+        leak_call_chains, func_counts, subtree_costs, func_to_file, library,
+        newprimeall=args.newprimeall, newprimeone=args.newprimeone
     )
 
     print()
-    if strategy == "P1":
+    if strategy == "NewPrimeAll":
+        print(f"  Strategy: NewPrimeAll (stub all terminal leakers, {len(strat_info)} found)")
+        for func, pct, _ in strat_info:
+            print(f"    {func:40s}  {100*pct:5.1f}%  [terminal leaker]")
+        if excluded:
+            print(f"  Functions in A but excluded (also in B): {', '.join(excluded)}")
+    elif strategy == "NewPrimeOne":
+        func, pct, _ = strat_info[0]
+        print(f"  Strategy: NewPrimeOne (stub highest-cost terminal leaker)")
+        print(f"    SELECTED: {func:30s}  {100*pct:5.1f}%  [terminal leaker]")
+        if excluded:
+            print(f"  Functions in A but excluded (also in B): {', '.join(excluded)}")
+    elif strategy == "P1":
         func, pct, _ = strat_info[0]
         print(f"  Strategy: P1 (dominant leaking BN, threshold={AUTO_P1_DOMINANCE_THRESHOLD:.0%})")
         print(f"    {func:40s}  {100*pct:5.1f}%  [leaking + dominant]")
@@ -2148,7 +2208,7 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
             covered = [f for f, fp in func_to_file.items() if fp == fpath]
             print(f"  + {os.path.relpath(fpath, args.root)} (replaces: {', '.join(sorted(covered))})")
 
-    return stats, leaks_path, leak_sites, leak_times, new_files, func_to_file, func_counts
+    return stats, leaks_path, leak_sites, leak_times, new_files, func_to_file, func_counts, excluded
 
 
 def auto_test(args):
@@ -2267,7 +2327,7 @@ def auto_test(args):
             print(f"[AUTO] Replay iteration {i}  (log: {os.path.relpath(prev_log, args.root)})")
             print(f"{'='*60}")
 
-            stats_r, leaks_path_r, sites_r, times_r, new_files_r, _, _ = \
+            stats_r, leaks_path_r, sites_r, times_r, new_files_r, _, _, _ = \
                 _auto_iter_report(i, prev_log, binary_path, accumulated_stubs,
                                   args, script_root, resolved_keylen, generate_leaks=False)
 
@@ -2331,7 +2391,7 @@ def auto_test(args):
         if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
             success = False
 
-        stats, leaks_path, leak_sites, leak_times, new_files, func_to_file, func_counts = \
+        stats, leaks_path, leak_sites, leak_times, new_files, func_to_file, func_counts, excluded = \
             _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
                               args, script_root, resolved_keylen, generate_leaks=True)
 
