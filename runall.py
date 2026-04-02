@@ -636,7 +636,7 @@ def print_stub_tables(tests, root):
         print()
 
 
-def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0, tree=False, dead_erase=False, report_diff=False, parallel=False):
+def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0, tree=False, dead_erase=False, report_diff=False, parallel=False, newprimeall=False, newprimeone=False, no_final=False, no_all=False, tag="", report=""):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
         sys.executable, os.path.join(root, "runbench.py"),
@@ -647,6 +647,12 @@ def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0
         "--memlimit", str(memlimit),
     ]
 
+    if tag:
+        cmd += ["--tag", tag]
+
+    if report:
+        cmd += ["--report", report]
+
     if test["optimization"]:
         cmd += ["--optimization", test["optimization"]]
 
@@ -656,6 +662,15 @@ def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0
             cmd += ["--dead-erase"]
     elif auto:
         cmd += ["--auto"]
+
+    if newprimeall:
+        cmd += ["--newprimeall"]
+    if newprimeone:
+        cmd += ["--newprimeone"]
+    if no_final:
+        cmd += ["--no-final"]
+    if no_all:
+        cmd += ["--no-all"]
 
     if report_diff:
         cmd += ["--report-diff"]
@@ -717,6 +732,11 @@ def main():
                         help="Run N primitives in parallel (0 = sequential, default)")
     parser.add_argument("--group", type=int, default=0,
                         help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
+    parser.add_argument("--newprimeall", action="store_true", help="In auto mode, use the Terminal Leakers strategy (stub all terminal leakers)")
+    parser.add_argument("--newprimeone", action="store_true", help="In auto mode, use the Terminal Leakers strategy (stub one terminal leaker per iteration)")
+    parser.add_argument("--no-final", action="store_true", help="Skip the final run without stubs")
+    parser.add_argument("--no-all", action="store_true", help="Skip the run with all available stubs")
+    parser.add_argument("--tag", type=str, default="", help="Tag for log files")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
     parser.add_argument("--missing", action="store_true",
                         help="Skip tests whose result logs already exist and have >1000 lines; reuse existing logs for reporting")
@@ -845,7 +865,7 @@ def main():
         label = t["label"]
         if args.missing and has_complete_logs(t, root):
             return (i, t, label, True, 0, "skipped", True)
-        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group, args.tree, args.dead_erase, args.report_diff, args.parallel)
+        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group, args.tree, args.dead_erase, args.report_diff, args.parallel, args.newprimeall, args.newprimeone, args.no_final, args.no_all, args.tag, args.report)
         return (i, t, label, success, elapsed, cmd_str, False)
 
     # Parallel or sequential execution

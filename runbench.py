@@ -75,6 +75,8 @@ def parse_args():
     parser.add_argument("--auto", action="store_true", help="Auto mode: iteratively discover and add bignum stubs")
     parser.add_argument("--newprimeall", action="store_true", help="In auto mode, use the Terminal Leakers strategy (stub all terminal leakers)")
     parser.add_argument("--newprimeone", action="store_true", help="In auto mode, use the Terminal Leakers strategy (stub one terminal leaker per iteration)")
+    parser.add_argument("--no-final", action="store_true", help="Skip the final run without stubs")
+    parser.add_argument("--no-all", action="store_true", help="Skip the run with all available stubs")
     parser.add_argument("--resume-from", type=int, default=0, metavar="N",
                         help="In auto mode, skip to iteration N by replaying existing logs for iterations 0..N-1")
     parser.add_argument("--tree", action="store_true", help="Tree mode: start with all stubs, progressively unstub to find leak sources")
@@ -2163,7 +2165,7 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
     else:
         print(f"  No stubs found (no leaking BN functions, no BN function reaches {AUTO_P3_SUBTREE_THRESHOLD:.0%} subtree share).")
         print(f"  {'─'*56}")
-        return stats, leaks_path, leak_sites, leak_times, set(), func_to_file, func_counts
+        return stats, leaks_path, leak_sites, leak_times, set(), func_to_file, func_counts, excluded
 
     # Compute new files respecting --group
     resolved_files = set(resolved.values())
@@ -2417,142 +2419,144 @@ def auto_test(args):
     is_keygen = "keygen" in algorithm
 
     # ── All-stubs run: use every keylen-compatible stub file ──
-    all_stubs = find_all_keylen_stubs(script_root, args.library, args.platform, resolved_keylen)
-    new_all_stubs = all_stubs - accumulated_stubs
+    if not args.no_all:
+        all_stubs = find_all_keylen_stubs(script_root, args.library, args.platform, resolved_keylen)
+        new_all_stubs = all_stubs - accumulated_stubs
 
-    print(f"\n{'='*60}")
-    print(f"[AUTO] All-stubs run ({len(all_stubs)} stub files, {len(new_all_stubs)} new)")
-    print(f"{'='*60}")
+        print(f"\n{'='*60}")
+        print(f"[AUTO] All-stubs run ({len(all_stubs)} stub files, {len(new_all_stubs)} new)")
+        print(f"{'='*60}")
 
-    if new_all_stubs:
-        print(f"  Additional stubs beyond progressive:")
-        for sf in sorted(new_all_stubs):
-            print(f"    + {os.path.relpath(sf, args.root)}")
+        if new_all_stubs:
+            print(f"  Additional stubs beyond progressive:")
+            for sf in sorted(new_all_stubs):
+                print(f"    + {os.path.relpath(sf, args.root)}")
 
-    all_stubs_scripts = ("," + ",".join(sorted(all_stubs))) if all_stubs else ""
-    script_files = (
-        f"{base_root_ini},{script_root}{args.platform}/mem.ini"
-        f"{random_file}{gs_path}{extra}{base_stubs}{all_stubs_scripts}"
-    )
+        all_stubs_scripts = ("," + ",".join(sorted(all_stubs))) if all_stubs else ""
+        script_files = (
+            f"{base_root_ini},{script_root}{args.platform}/mem.ini"
+            f"{random_file}{gs_path}{extra}{base_stubs}{all_stubs_scripts}"
+        )
 
-    log_file = f"{output_path}/{nature}_auto_allstubs{tag}.log"
+        log_file = f"{output_path}/{nature}_auto_allstubs{tag}.log"
 
-    run_cmd = (
-        f"binsec -sse -checkct {bn_option}-sse-missing-symbol warn -sse-script {script_files} "
-        f"-sse-debug-level {dbg} -sse-depth 1000000000 "
-        f"-fml-solver-timeout 600 -sse-timeout {args.timeout} {binary_path} "
-        f"-smt-solver bitwuzla:smtlib"
-    )
+        run_cmd = (
+            f"binsec -sse -checkct {bn_option}-sse-missing-symbol warn -sse-script {script_files} "
+            f"-sse-debug-level {dbg} -sse-depth 1000000000 "
+            f"-fml-solver-timeout 600 -sse-timeout {args.timeout} {binary_path} "
+            f"-smt-solver bitwuzla:smtlib"
+        )
 
-    parts = run_cmd.split()
-    if parts:
-        program = parts[0]
-        run_args = parts[1:]
+        parts = run_cmd.split()
+        if parts:
+            program = parts[0]
+            run_args = parts[1:]
 
-        print(f"[CASE] auto allstubs")
-        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
-            success = False
-        n_alerts = count_leaks_in_log(log_file)
-        leaks_path = log_file.replace('.log', '.leaks')
-        n_unique = 0
-        if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
-            n = count_unique_in_leaks([leaks_path])
-            if n is not None:
-                n_unique = n
-            iteration_leaks_files.append(leaks_path)
-        elif n_alerts > 0:
-            n_unique = len(get_unique_leak_addrs(log_file))
-        hooked_bn = get_hooked_bn_functions(log_file, args.library)
-        iteration_stats.append({
-            "iteration": "allstubs",
-            "phase": "allstubs",
-            "alerts": n_alerts,
-            "unique_alerts": n_unique,
-            "stubs": count_stubbed_functions(all_stubs),
-            "hooked_bn": len(hooked_bn),
-            "hooked_bn_funcs": sorted(hooked_bn),
-            "log_file": os.path.relpath(log_file, args.root),
-        })
-        if args.report_diff and leaks_path and os.path.exists(leaks_path):
-            sites = extract_unique_leak_sites([leaks_path])
-            times = extract_leak_sites_with_time(leaks_path)
-            iteration_leak_sites.append(sites if sites else set())
-            iteration_leak_times.append(times if times else {})
-        else:
-            iteration_leak_sites.append(set())
-            iteration_leak_times.append({})
-        if hooked_bn:
-            print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
-            for f in sorted(hooked_bn):
-                print(f"    {f}")
+            print(f"[CASE] auto allstubs")
+            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+                success = False
+            n_alerts = count_leaks_in_log(log_file)
+            leaks_path = log_file.replace('.log', '.leaks')
+            n_unique = 0
+            if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+                n = count_unique_in_leaks([leaks_path])
+                if n is not None:
+                    n_unique = n
+                iteration_leaks_files.append(leaks_path)
+            elif n_alerts > 0:
+                n_unique = len(get_unique_leak_addrs(log_file))
+            hooked_bn = get_hooked_bn_functions(log_file, args.library)
+            iteration_stats.append({
+                "iteration": "allstubs",
+                "phase": "allstubs",
+                "alerts": n_alerts,
+                "unique_alerts": n_unique,
+                "stubs": count_stubbed_functions(all_stubs),
+                "hooked_bn": len(hooked_bn),
+                "hooked_bn_funcs": sorted(hooked_bn),
+                "log_file": os.path.relpath(log_file, args.root),
+            })
+            if args.report_diff and leaks_path and os.path.exists(leaks_path):
+                sites = extract_unique_leak_sites([leaks_path])
+                times = extract_leak_sites_with_time(leaks_path)
+                iteration_leak_sites.append(sites if sites else set())
+                iteration_leak_times.append(times if times else {})
+            else:
+                iteration_leak_sites.append(set())
+                iteration_leak_times.append({})
+            if hooked_bn:
+                print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
+                for f in sorted(hooked_bn):
+                    print(f"    {f}")
 
     # ── Final run: no stubs, extended timeout ──
-    # For keygen, keep bn enabled (same as iteration 0)
-    final_timeout = args.timeout * (total_iterations + 1)  # +1 for allstubs run
-    final_bn = bn_option if is_keygen else ""
-    final_base_stubs = base_stubs if is_keygen else ""
+    if not args.no_final:
+        # For keygen, keep bn enabled (same as iteration 0)
+        final_timeout = args.timeout * (total_iterations + 1)  # +1 for allstubs run
+        final_bn = bn_option if is_keygen else ""
+        final_base_stubs = base_stubs if is_keygen else ""
 
-    bn_label = "with BN" if is_keygen else "no BN"
-    print(f"\n{'='*60}")
-    print(f"[AUTO] Final run ({bn_label}, no extra stubs, timeout={final_timeout}s)")
-    print(f"{'='*60}")
+        bn_label = "with BN" if is_keygen else "no BN"
+        print(f"\n{'='*60}")
+        print(f"[AUTO] Final run ({bn_label}, no extra stubs, timeout={final_timeout}s)")
+        print(f"{'='*60}")
 
-    script_files = (
-        f"{base_root_ini},{script_root}{args.platform}/mem.ini"
-        f"{random_file}{gs_path}{extra}{final_base_stubs}"
-    )
+        script_files = (
+            f"{base_root_ini},{script_root}{args.platform}/mem.ini"
+            f"{random_file}{gs_path}{extra}{final_base_stubs}"
+        )
 
-    log_file = f"{output_path}/{nature}_auto_final{tag}.log"
+        log_file = f"{output_path}/{nature}_auto_final{tag}.log"
 
-    run_cmd = (
-        f"binsec -sse -checkct {final_bn}-sse-missing-symbol warn -sse-script {script_files} "
-        f"-sse-debug-level {dbg} -sse-depth 1000000000 "
-        f"-fml-solver-timeout 600 -sse-timeout {final_timeout} {binary_path} "
-        f"-smt-solver bitwuzla:smtlib"
-    )
+        run_cmd = (
+            f"binsec -sse -checkct {final_bn}-sse-missing-symbol warn -sse-script {script_files} "
+            f"-sse-debug-level {dbg} -sse-depth 1000000000 "
+            f"-fml-solver-timeout 600 -sse-timeout {final_timeout} {binary_path} "
+            f"-smt-solver bitwuzla:smtlib"
+        )
 
-    parts = run_cmd.split()
-    if parts:
-        program = parts[0]
-        run_args = parts[1:]
+        parts = run_cmd.split()
+        if parts:
+            program = parts[0]
+            run_args = parts[1:]
 
-        print(f"[CASE] auto final")
-        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
-            success = False
-        n_alerts = count_leaks_in_log(log_file)
-        leaks_path = log_file.replace('.log', '.leaks')
-        n_unique = 0
-        final_leaks_file = None
-        if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
-            n = count_unique_in_leaks([leaks_path])
-            if n is not None:
-                n_unique = n
-            final_leaks_file = leaks_path
-        elif n_alerts > 0:
-            n_unique = len(get_unique_leak_addrs(log_file))
-        hooked_bn = get_hooked_bn_functions(log_file, args.library)
-        iteration_stats.append({
-            "iteration": "final",
-            "phase": "final",
-            "alerts": n_alerts,
-            "unique_alerts": n_unique,
-            "stubs": 0,
-            "hooked_bn": len(hooked_bn),
-            "hooked_bn_funcs": sorted(hooked_bn),
-            "log_file": os.path.relpath(log_file, args.root),
-        })
-        if args.report_diff and leaks_path and os.path.exists(leaks_path):
-            sites = extract_unique_leak_sites([leaks_path])
-            times = extract_leak_sites_with_time(leaks_path)
-            iteration_leak_sites.append(sites if sites else set())
-            iteration_leak_times.append(times if times else {})
-        else:
-            iteration_leak_sites.append(set())
-            iteration_leak_times.append({})
-        if hooked_bn:
-            print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
-            for f in sorted(hooked_bn):
-                print(f"    {f}")
+            print(f"[CASE] auto final")
+            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+                success = False
+            n_alerts = count_leaks_in_log(log_file)
+            leaks_path = log_file.replace('.log', '.leaks')
+            n_unique = 0
+            final_leaks_file = None
+            if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+                n = count_unique_in_leaks([leaks_path])
+                if n is not None:
+                    n_unique = n
+                final_leaks_file = leaks_path
+            elif n_alerts > 0:
+                n_unique = len(get_unique_leak_addrs(log_file))
+            hooked_bn = get_hooked_bn_functions(log_file, args.library)
+            iteration_stats.append({
+                "iteration": "final",
+                "phase": "final",
+                "alerts": n_alerts,
+                "unique_alerts": n_unique,
+                "stubs": 0,
+                "hooked_bn": len(hooked_bn),
+                "hooked_bn_funcs": sorted(hooked_bn),
+                "log_file": os.path.relpath(log_file, args.root),
+            })
+            if args.report_diff and leaks_path and os.path.exists(leaks_path):
+                sites = extract_unique_leak_sites([leaks_path])
+                times = extract_leak_sites_with_time(leaks_path)
+                iteration_leak_sites.append(sites if sites else set())
+                iteration_leak_times.append(times if times else {})
+            else:
+                iteration_leak_sites.append(set())
+                iteration_leak_times.append({})
+            if hooked_bn:
+                print(f"  [BN HOOKS] {len(hooked_bn)} BN functions applied:")
+                for f in sorted(hooked_bn):
+                    print(f"    {f}")
 
     # ── Compute merged unique alert counts via merge_reports ──
     # Per-phase: use the individual iteration stats (already computed)
