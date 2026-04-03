@@ -563,6 +563,19 @@ def generate_leaks_file(log_file, binary_path, output_leaks):
         return False
 
 
+def generate_uniq_file(leaks_file, output_uniq):
+    """Run merge_reports --uniq-source on a .leaks file to produce a .uniq file."""
+    merge_reports = os.path.join(os.path.dirname(os.path.abspath(__file__)), "merge_reports.py")
+    try:
+        r = subprocess.run(
+            [sys.executable, merge_reports, '--uniq-source', '-o', output_uniq, leaks_file],
+            capture_output=True, text=True, timeout=60
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def count_unique_in_leaks(leaks_files):
     """Run merge_reports --uniq-source on .leaks files and return unique count.
 
@@ -1208,11 +1221,14 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
                     A.add(func)
                     break
             
-            # If we found a target BN function, check if its caller is also a BN function
-            if target_idx != -1 and len(chain) > target_idx + 1:
-                caller = chain[target_idx + 1]
-                if is_bn_function(caller, library) and caller in func_to_file:
-                    B.add(caller)
+            # If we found a target BN function, add ALL BN functions further up 
+            # the chain to Set B. This ensures that 'C = A - B' identifies 
+            # only the "lowest" stubbable BN functions in the hierarchy.
+            if target_idx != -1:
+                for i in range(target_idx + 1, len(chain)):
+                    caller = chain[i]
+                    if is_bn_function(caller, library) and caller in func_to_file:
+                        B.add(caller)
 
         # C = terminal leakers
         C = A - B
@@ -1654,6 +1670,7 @@ def tree_test(args):
         n_unique = 0
         leaks_path = log_file.replace('.log', '.leaks')
         if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+            generate_uniq_file(leaks_path, leaks_path + ".uniq")
             n = count_unique_in_leaks([leaks_path])
             if n is not None:
                 n_unique = n
@@ -1852,6 +1869,7 @@ def tree_test(args):
         leaks_path = log_file.replace('.log', '.leaks')
         n_unique = 0
         if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+            generate_uniq_file(leaks_path, leaks_path + ".uniq")
             n = count_unique_in_leaks([leaks_path])
             if n is not None:
                 n_unique = n
@@ -2027,6 +2045,7 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
     if n_alerts > 0:
         if generate_leaks:
             if generate_leaks_file(log_file, binary_path, leaks_path):
+                generate_uniq_file(leaks_path, leaks_path + ".uniq")
                 n = count_unique_in_leaks([leaks_path])
                 if n is not None:
                     n_unique = n
@@ -2462,6 +2481,7 @@ def auto_test(args):
             leaks_path = log_file.replace('.log', '.leaks')
             n_unique = 0
             if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+                generate_uniq_file(leaks_path, leaks_path + ".uniq")
                 n = count_unique_in_leaks([leaks_path])
                 if n is not None:
                     n_unique = n
@@ -2531,6 +2551,7 @@ def auto_test(args):
             n_unique = 0
             final_leaks_file = None
             if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+                generate_uniq_file(leaks_path, leaks_path + ".uniq")
                 n = count_unique_in_leaks([leaks_path])
                 if n is not None:
                     n_unique = n
