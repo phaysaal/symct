@@ -1195,20 +1195,23 @@ def resolve_auto_stubs(leak_call_chains, func_line_counts, subtree_costs,
 
     # Identify sets for NewPrime strategies
     if newprimeall or newprimeone:
-        # A = set of leaking BN functions (leaf of at least one chain) that have a stub
+        # A = set of the "nearest" stubbable BN functions for each leak chain
+        # B = set of BN functions that call ANY function in set A within those chains
         A = set()
-        for chain in leak_call_chains:
-            if chain and is_bn_function(chain[0], library) and chain[0] in func_to_file:
-                A.add(chain[0])
-
-        # B = set of BN functions that call ANY function in set A
         B = set()
         for chain in leak_call_chains:
-            if len(chain) > 1:
-                leaker = chain[0]
-                caller = chain[1]
-                # If immediate caller is BN and callee is a terminal leaker candidate (A)
-                if leaker in A and is_bn_function(caller, library) and caller in func_to_file:
+            # Find the first stubbable BN function in this chain
+            target_idx = -1
+            for i, func in enumerate(chain):
+                if is_bn_function(func, library) and func in func_to_file:
+                    target_idx = i
+                    A.add(func)
+                    break
+            
+            # If we found a target BN function, check if its caller is also a BN function
+            if target_idx != -1 and len(chain) > target_idx + 1:
+                caller = chain[target_idx + 1]
+                if is_bn_function(caller, library) and caller in func_to_file:
                     B.add(caller)
 
         # C = terminal leakers
