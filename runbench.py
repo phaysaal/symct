@@ -273,8 +273,10 @@ def single_test(args):
     # Determine binary path
     if args.startfrom == "core":
         binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}.core"
+        debug_binary = binary_path[:-5]
     else:
         binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}"
+        debug_binary = binary_path
 
     # Auto-build if starting from core or --build is specified
     if args.build or args.startfrom == "core":
@@ -1580,8 +1582,10 @@ def tree_test(args):
     # Determine binary path
     if args.startfrom == "core":
         binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}.core"
+        debug_binary = binary_path[:-5]
     else:
         binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}"
+        debug_binary = binary_path
 
     # Auto-build
     if args.build or args.startfrom == "core":
@@ -1669,7 +1673,7 @@ def tree_test(args):
         # Generate .leaks and count unique
         n_unique = 0
         leaks_path = log_file.replace('.log', '.leaks')
-        if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+        if generate_leaks_file(log_file, debug_binary, leaks_path):
             generate_uniq_file(leaks_path, leaks_path + ".uniq")
             n = count_unique_in_leaks([leaks_path])
             if n is not None:
@@ -1868,7 +1872,7 @@ def tree_test(args):
         n_alerts = count_leaks_in_log(log_file)
         leaks_path = log_file.replace('.log', '.leaks')
         n_unique = 0
-        if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+        if generate_leaks_file(log_file, debug_binary, leaks_path):
             generate_uniq_file(leaks_path, leaks_path + ".uniq")
             n = count_unique_in_leaks([leaks_path])
             if n is not None:
@@ -2042,19 +2046,18 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
 
     leaks_path = log_file.replace('.log', '.leaks')
     n_unique = 0
-    if n_alerts > 0:
-        if generate_leaks:
-            if generate_leaks_file(log_file, binary_path, leaks_path):
-                generate_uniq_file(leaks_path, leaks_path + ".uniq")
-                n = count_unique_in_leaks([leaks_path])
-                if n is not None:
-                    n_unique = n
-            else:
-                n_unique = len(get_unique_leak_addrs(log_file))
-        elif os.path.exists(leaks_path):
+    if generate_leaks:
+        if generate_leaks_file(log_file, binary_path, leaks_path):
+            generate_uniq_file(leaks_path, leaks_path + ".uniq")
             n = count_unique_in_leaks([leaks_path])
             if n is not None:
                 n_unique = n
+        else:
+            n_unique = len(get_unique_leak_addrs(log_file))
+    elif os.path.exists(leaks_path):
+        n = count_unique_in_leaks([leaks_path])
+        if n is not None:
+            n_unique = n
 
     hooked_bn = get_hooked_bn_functions(log_file, library)
     phase_name = "no_stub" if iteration == 0 else f"stub_{iteration}"
@@ -2293,8 +2296,10 @@ def auto_test(args):
     # Determine binary path
     if args.startfrom == "core":
         binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}.core"
+        debug_binary = binary_path[:-5]
     else:
         binary_path = f"{args.root}/benchmark/{args.platform}/{library_str}/{algorithm}/bin/{algorithm}_{library_str}_{args.platform}"
+        debug_binary = binary_path
 
     # Auto-build if starting from core or --build is specified
     if args.build or args.startfrom == "core":
@@ -2352,7 +2357,7 @@ def auto_test(args):
             print(f"{'='*60}")
 
             stats_r, leaks_path_r, sites_r, times_r, new_files_r, _, _, _ = \
-                _auto_iter_report(i, prev_log, binary_path, accumulated_stubs,
+                _auto_iter_report(i, prev_log, debug_binary, accumulated_stubs,
                                   args, script_root, resolved_keylen, generate_leaks=False)
 
             iteration_stats.append(stats_r)
@@ -2416,7 +2421,7 @@ def auto_test(args):
             success = False
 
         stats, leaks_path, leak_sites, leak_times, new_files, func_to_file, func_counts, excluded = \
-            _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
+            _auto_iter_report(iteration, log_file, debug_binary, accumulated_stubs,
                               args, script_root, resolved_keylen, generate_leaks=True)
 
         iteration_stats.append(stats)
@@ -2480,7 +2485,7 @@ def auto_test(args):
             n_alerts = count_leaks_in_log(log_file)
             leaks_path = log_file.replace('.log', '.leaks')
             n_unique = 0
-            if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+            if generate_leaks_file(log_file, debug_binary, leaks_path):
                 generate_uniq_file(leaks_path, leaks_path + ".uniq")
                 n = count_unique_in_leaks([leaks_path])
                 if n is not None:
@@ -2550,7 +2555,7 @@ def auto_test(args):
             leaks_path = log_file.replace('.log', '.leaks')
             n_unique = 0
             final_leaks_file = None
-            if n_alerts > 0 and generate_leaks_file(log_file, binary_path, leaks_path):
+            if generate_leaks_file(log_file, debug_binary, leaks_path):
                 generate_uniq_file(leaks_path, leaks_path + ".uniq")
                 n = count_unique_in_leaks([leaks_path])
                 if n is not None:
