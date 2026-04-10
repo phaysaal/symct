@@ -121,6 +121,10 @@ def _analyze_log_cmd():
                         help="Key length for stub compatibility filtering (0 = any)")
     parser.add_argument("--iteration", type=int, default=None,
                         help="Override iteration number (auto-detected from filename if omitted)")
+    parser.add_argument("--newprimeall", action="store_true",
+                        help="Show analysis as NewPrimeAll strategy")
+    parser.add_argument("--newprimeone", action="store_true",
+                        help="Show analysis as NewPrimeOne strategy")
     args = parser.parse_args()
 
     # Build a minimal Namespace that satisfies _auto_iter_report
@@ -134,6 +138,8 @@ def _analyze_log_cmd():
         dead_erase=False,
         optimization="",
         timeout=0,
+        newprimeall=args.newprimeall,
+        newprimeone=args.newprimeone,
     )
     script_root = f"{fake_args.root}/binsec/"
 
@@ -2342,31 +2348,42 @@ def auto_test(args):
     iteration_leak_sites = []  # list of sets of leak site strings per iteration (for diff report)
     iteration_leak_times = []  # list of dicts mapping site -> earliest_time (parallel)
 
-    # --resume-from N: replay existing logs for iterations 0..N-1 to rebuild state
+    # --resume-from N: reconstruct accumulated stubs by reading only log N-1.
+    # That log was run with all stubs from iterations 0..N-2 already applied
+    # (visible as `hook at` annotations), plus iteration N-1 adds its own new
+    # stubs.  Together they give the full accumulated stub set for iteration N.
     resume_from = getattr(args, 'resume_from', 0)
     if resume_from > 0:
-        print(f"\n[AUTO] Resuming from iteration {resume_from} — replaying {resume_from} existing log(s)")
-        for i in range(resume_from):
-            prev_log = f"{output_path}/{nature}_auto_{i}{tag}.log"
-            if not os.path.exists(prev_log):
-                print(f"[ERROR] Cannot resume: log for iteration {i} not found: {prev_log}", file=sys.stderr)
-                return False
+        prev_log = f"{output_path}/{nature}_auto_{resume_from - 1}{tag}.log"
+        if not os.path.exists(prev_log):
+            print(f"[ERROR] Cannot resume: log for iteration {resume_from - 1} not found: {prev_log}",
+                  file=sys.stderr)
+            return False
 
-            print(f"\n{'='*60}")
-            print(f"[AUTO] Replay iteration {i}  (log: {os.path.relpath(prev_log, args.root)})")
-            print(f"{'='*60}")
+        print(f"\n[AUTO] Resuming from iteration {resume_from} — reading log {resume_from - 1}")
+        print(f"{'='*60}")
+        print(f"[AUTO] Replay iteration {resume_from - 1}  (log: {os.path.relpath(prev_log, args.root)})")
+        print(f"{'='*60}")
 
-            stats_r, leaks_path_r, sites_r, times_r, new_files_r, _, _, _ = \
-                _auto_iter_report(i, prev_log, debug_binary, accumulated_stubs,
-                                  args, script_root, resolved_keylen, generate_leaks=False)
+        # Reconstruct stubs that were already active in log N-1 (hooks in the log)
+        # and map them back to stub files via func_to_file.
+        all_bn_funcs_r = get_hooked_bn_functions(prev_log, args.library)
+        func_to_file_r = find_stub_files_for_auto(
+            script_root, args.library, args.platform, all_bn_funcs_r, resolved_keylen)
+        for func, fpath in func_to_file_r.items():
+            accumulated_stubs.add(fpath)
 
-            iteration_stats.append(stats_r)
-            if leaks_path_r and os.path.exists(leaks_path_r):
-                iteration_leaks_files.append(leaks_path_r)
-            iteration_leak_sites.append(sites_r)
-            iteration_leak_times.append(times_r)
+        # Also run the report to pick up stubs decided by iteration N-1 itself.
+        stats_r, leaks_path_r, sites_r, times_r, new_files_r, _, _, _ = \
+            _auto_iter_report(resume_from - 1, prev_log, debug_binary, accumulated_stubs,
+                              args, script_root, resolved_keylen, generate_leaks=False)
 
-            accumulated_stubs.update(new_files_r)
+        iteration_stats.append(stats_r)
+        if leaks_path_r and os.path.exists(leaks_path_r):
+            iteration_leaks_files.append(leaks_path_r)
+        iteration_leak_sites.append(sites_r)
+        iteration_leak_times.append(times_r)
+        accumulated_stubs.update(new_files_r)
 
         iteration = resume_from
         print(f"\n[AUTO] State restored — starting execution at iteration {iteration}")
