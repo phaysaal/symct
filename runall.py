@@ -274,7 +274,7 @@ def count_leaks_in_file(leaks_file):
         return 0
 
 
-def print_leak_summary(tests, root, results, merged_files=None, individual_leaks=None):
+def print_leak_summary(tests, root, results, merged_files=None, individual_leaks=None, end_report=False):
     """Parse logs and print a leak analysis summary with file paths."""
     if merged_files is None:
         merged_files = {}
@@ -325,6 +325,9 @@ def print_leak_summary(tests, root, results, merged_files=None, individual_leaks
     ))
     if not all_leak_types:
         all_leak_types = ["control flow", "memory access"]
+
+    if not end_report:
+        return
 
     # Print summary
     print()
@@ -636,7 +639,7 @@ def print_stub_tables(tests, root):
         print()
 
 
-def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0, tree=False, dead_erase=False, report_diff=False, parallel=False, newprimeall=False, newprimeone=False, no_final=False, no_all=False, tag="", report=""):
+def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0, tree=False, dead_erase=False, report_diff=False, parallel=False, newprimeall=False, newprimeone=False, no_final=False, no_all=False, tag="", report="", end_report=False):
     """Run a single test and return (label, success, elapsed)."""
     cmd = [
         sys.executable, os.path.join(root, "runbench.py"),
@@ -674,6 +677,9 @@ def run_test(test, root, timeout, memlimit, progressive=None, auto=True, group=0
 
     if report_diff:
         cmd += ["--report-diff"]
+
+    if end_report:
+        cmd += ["--end-report"]
 
     if parallel:
         cmd += ["--parallel"]
@@ -737,6 +743,7 @@ def main():
     parser.add_argument("--no-final", action="store_true", help="Skip the final run without stubs")
     parser.add_argument("--no-all", action="store_true", help="Skip the run with all available stubs")
     parser.add_argument("--tag", type=str, default="", help="Tag for log files")
+    parser.add_argument("--end-report", action="store_true", help="Print end-of-run summary report")
     parser.add_argument("--dry-run", action="store_true", help="List tests without running")
     parser.add_argument("--missing", action="store_true",
                         help="Skip tests whose result logs already exist and have >1000 lines; reuse existing logs for reporting")
@@ -865,7 +872,7 @@ def main():
         label = t["label"]
         if args.missing and has_complete_logs(t, root):
             return (i, t, label, True, 0, "skipped", True)
-        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group, args.tree, args.dead_erase, args.report_diff, args.parallel, args.newprimeall, args.newprimeone, args.no_final, args.no_all, args.tag, args.report)
+        label, success, elapsed, cmd_str = run_test(t, root, args.timeout, args.memlimit, args.progressive, args.auto, args.group, args.tree, args.dead_erase, args.report_diff, args.parallel, args.newprimeall, args.newprimeone, args.no_final, args.no_all, args.tag, args.report, end_report=args.end_report)
         return (i, t, label, success, elapsed, cmd_str, False)
 
     # Parallel or sequential execution
@@ -1099,7 +1106,7 @@ def main():
             if run_merge_reports(files, merged_file):
                 merged_files[library] = merged_file
 
-    print_leak_summary(tests, root, results, merged_files, individual_leaks)
+    print_leak_summary(tests, root, results, merged_files, individual_leaks, end_report=args.end_report)
 
     # Print per-library leak tables
     if table_data:

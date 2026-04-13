@@ -83,6 +83,7 @@ def parse_args():
     parser.add_argument("--dead-erase", action="store_true", help="In tree mode, auto-generate empty stubs for dead regions (no leaks, no BN) to speed up subsequent runs")
     parser.add_argument("--group", type=int, default=0, help="In auto mode, add at most K new stub files per iteration (0 = all at once)")
     parser.add_argument("--report-diff", action="store_true", help="Show per-iteration leak diff report (new/removed leaks between iterations)")
+    parser.add_argument("--end-report", action="store_true", help="Print end-of-run summary report")
     parser.add_argument("--parallel", action="store_true", help="In progressive mode, run all iterations in parallel")
     parser.add_argument("--clean", action="store_true", help="Delete existing results and reports for this primitive before running")
 
@@ -140,6 +141,7 @@ def _analyze_log_cmd():
         timeout=0,
         newprimeall=args.newprimeall,
         newprimeone=args.newprimeone,
+        end_report=False,
     )
     script_root = f"{fake_args.root}/binsec/"
 
@@ -384,7 +386,7 @@ def single_test(args):
             if args.progressive:
                 print(f"[STEP {idx}/{total_combs}] progressive={args.progressive} step={name}")
             print(f"[CASE] {','.join(c) if c else '(no stubs)'}")
-            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit, gzip_after=not args.end_report):
                 success = False
             completed.append((name, idx, log_file, c))
 
@@ -434,27 +436,28 @@ def single_test(args):
         merged_file = os.path.join(report_dir, merged_name)
         run_merge_reports(leaks_files, merged_file)
 
-    # Summary table
-    if iteration_stats and len(iteration_stats) > 1:
-        print(f"\n{'='*60}")
-        print(f"[PROGRESSIVE] Summary")
-        print(f"{'='*60}")
-        print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}  BN Functions Applied")
-        print(f"  {'-'*100}")
-        for s in iteration_stats:
-            bn_list = ", ".join(s.get('hooked_bn_funcs', []))
-            print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}  {bn_list}")
+    if args.end_report:
+        # Summary table
+        if iteration_stats and len(iteration_stats) > 1:
+            print(f"\n{'='*60}")
+            print(f"[PROGRESSIVE] Summary")
+            print(f"{'='*60}")
+            print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}  BN Functions Applied")
+            print(f"  {'-'*100}")
+            for s in iteration_stats:
+                bn_list = ", ".join(s.get('hooked_bn_funcs', []))
+                print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}  {bn_list}")
 
-    # Diff report
-    if args.report_diff and iteration_leak_sites:
-        print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
-
-    # LaTeX tables
-    if iteration_stats and len(iteration_stats) > 1:
-        latex_title = f"{args.library} {algorithm} {args.optimization or ''} (progressive)"
-        print_latex_table(iteration_stats, latex_title)
+        # Diff report
         if args.report_diff and iteration_leak_sites:
-            print_latex_diff_table(iteration_stats, iteration_leak_sites, latex_title)
+            print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
+
+        # LaTeX tables
+        if iteration_stats and len(iteration_stats) > 1:
+            latex_title = f"{args.library} {algorithm} {args.optimization or ''} (progressive)"
+            print_latex_table(iteration_stats, latex_title)
+            if args.report_diff and iteration_leak_sites:
+                print_latex_diff_table(iteration_stats, iteration_leak_sites, latex_title)
 
     return success
 
@@ -1670,7 +1673,7 @@ def tree_test(args):
 
         print(f"[CASE] tree {label}")
         nonlocal success
-        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit, gzip_after=not args.end_report):
             success = False
 
         n_alerts = count_leaks_in_log(log_file)
@@ -1872,7 +1875,7 @@ def tree_test(args):
         program = parts[0]
         run_args = parts[1:]
         print(f"[CASE] tree final")
-        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit, gzip_after=not args.end_report):
             success = False
 
         n_alerts = count_leaks_in_log(log_file)
@@ -1912,33 +1915,34 @@ def tree_test(args):
             for f in sorted(hooked_bn):
                 print(f"    {f}")
 
-    # ── Summary ──
-    print(f"\n{'='*60}")
-    print(f"[TREE] Summary")
-    print(f"{'='*60}")
-    print(f"  {'Phase':<40s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}")
-    print(f"  {'-'*76}")
-    for s in iteration_stats:
-        phase = s['phase']
-        if s.get('parent'):
-            phase = f"  {phase} (from {s['parent']})"
-        dead_mark = " [DEAD]" if s.get('dead') else ""
-        print(f"  {phase:<40s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}{dead_mark}")
-        bn_funcs = s.get('hooked_bn_funcs', [])
-        if bn_funcs:
-            print(f"    BN applied: {', '.join(bn_funcs)}")
-    if dead_funcs:
-        print(f"\n  Dead branches ({len(dead_funcs)}): {', '.join(sorted(dead_funcs))}")
+    if args.end_report:
+        # ── Summary ──
+        print(f"\n{'='*60}")
+        print(f"[TREE] Summary")
+        print(f"{'='*60}")
+        print(f"  {'Phase':<40s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}")
+        print(f"  {'-'*76}")
+        for s in iteration_stats:
+            phase = s['phase']
+            if s.get('parent'):
+                phase = f"  {phase} (from {s['parent']})"
+            dead_mark = " [DEAD]" if s.get('dead') else ""
+            print(f"  {phase:<40s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}{dead_mark}")
+            bn_funcs = s.get('hooked_bn_funcs', [])
+            if bn_funcs:
+                print(f"    BN applied: {', '.join(bn_funcs)}")
+        if dead_funcs:
+            print(f"\n  Dead branches ({len(dead_funcs)}): {', '.join(sorted(dead_funcs))}")
 
-    # Diff report
-    if args.report_diff and iteration_leak_sites:
-        print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
+        # Diff report
+        if args.report_diff and iteration_leak_sites:
+            print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
 
-    # LaTeX tables
-    latex_title = f"{args.library} {algorithm} {args.optimization or ''} (tree)"
-    print_latex_table(iteration_stats, latex_title)
-    if args.report_diff and iteration_leak_sites:
-        print_latex_diff_table(iteration_stats, iteration_leak_sites, latex_title)
+        # LaTeX tables
+        latex_title = f"{args.library} {algorithm} {args.optimization or ''} (tree)"
+        print_latex_table(iteration_stats, latex_title)
+        if args.report_diff and iteration_leak_sites:
+            print_latex_diff_table(iteration_stats, iteration_leak_sites, latex_title)
 
     # ── Merged unique alerts across all runs ──
     merged_total = count_unique_in_leaks(iteration_leaks_files)
@@ -2434,7 +2438,7 @@ def auto_test(args):
             print(f"  + {os.path.relpath(sf, args.root)}")
 
         print(f"[CASE] auto iteration {iteration}")
-        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit, gzip_after=not args.end_report):
             success = False
 
         stats, leaks_path, leak_sites, leak_times, new_files, func_to_file, func_counts, excluded = \
@@ -2497,7 +2501,7 @@ def auto_test(args):
             run_args = parts[1:]
 
             print(f"[CASE] auto allstubs")
-            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit, gzip_after=not args.end_report):
                 success = False
             n_alerts = count_leaks_in_log(log_file)
             leaks_path = log_file.replace('.log', '.leaks')
@@ -2566,7 +2570,7 @@ def auto_test(args):
             run_args = parts[1:]
 
             print(f"[CASE] auto final")
-            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
+            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit, gzip_after=not args.end_report):
                 success = False
             n_alerts = count_leaks_in_log(log_file)
             leaks_path = log_file.replace('.log', '.leaks')
@@ -2623,30 +2627,31 @@ def auto_test(args):
         "final": final_count,
     }
 
-    # ── Summary statistics ──
-    print(f"\n{'='*60}")
-    print(f"[AUTO] Summary")
-    print(f"{'='*60}")
-    print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}  BN Functions Applied")
-    print(f"  {'-'*100}")
-    for s in iteration_stats:
-        bn_list = ", ".join(s.get('hooked_bn_funcs', []))
-        print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}  {bn_list}")
-    print(f"  {'-'*100}")
-    print(f"  {'No Stub (iter 0)':<20s} {'':<8s} {merged_counts['no_stub']:>8d}")
-    print(f"  {'All Stubs':<20s} {'':<8s} {merged_counts['allstubs']:>8d}")
-    print(f"  {'Progressive (all)':<20s} {'':<8s} {merged_counts['progressive']:>8d}")
-    print(f"  {'Final':<20s} {'':<8s} {merged_counts['final']:>8d}")
+    if args.end_report:
+        # ── Summary statistics ──
+        print(f"\n{'='*60}")
+        print(f"[AUTO] Summary")
+        print(f"{'='*60}")
+        print(f"  {'Phase':<20s} {'Alerts':>8s} {'Uniq Src':>8s} {'Stubs':>8s} {'BN Hook':>8s}  BN Functions Applied")
+        print(f"  {'-'*100}")
+        for s in iteration_stats:
+            bn_list = ", ".join(s.get('hooked_bn_funcs', []))
+            print(f"  {s['phase']:<20s} {s['alerts']:>8d} {s['unique_alerts']:>8d} {s['stubs']:>8d} {s['hooked_bn']:>8d}  {bn_list}")
+        print(f"  {'-'*100}")
+        print(f"  {'No Stub (iter 0)':<20s} {'':<8s} {merged_counts['no_stub']:>8d}")
+        print(f"  {'All Stubs':<20s} {'':<8s} {merged_counts['allstubs']:>8d}")
+        print(f"  {'Progressive (all)':<20s} {'':<8s} {merged_counts['progressive']:>8d}")
+        print(f"  {'Final':<20s} {'':<8s} {merged_counts['final']:>8d}")
 
-    # Diff report
-    if args.report_diff and iteration_leak_sites:
-        print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
+        # Diff report
+        if args.report_diff and iteration_leak_sites:
+            print_diff_report(iteration_stats, iteration_leak_sites, iteration_leak_times)
 
-    # LaTeX tables
-    latex_title = f"{args.library} {algorithm} {args.optimization or ''} (auto)"
-    print_latex_table(iteration_stats, latex_title)
-    if args.report_diff and iteration_leak_sites:
-        print_latex_diff_table(iteration_stats, iteration_leak_sites, latex_title)
+        # LaTeX tables
+        latex_title = f"{args.library} {algorithm} {args.optimization or ''} (auto)"
+        print_latex_table(iteration_stats, latex_title)
+        if args.report_diff and iteration_leak_sites:
+            print_latex_diff_table(iteration_stats, iteration_leak_sites, latex_title)
 
     # ── Write JSON results ──
     json_data = {
@@ -2978,12 +2983,20 @@ def make_memlimit_fn(memlimit_mb: int):
     return set_memlimit
 
 
-def run_and_log(program, args, log_file_name, algorithm, nature, tag, memlimit_mb: int = 0):
+def run_and_log(program, args, log_file_name, algorithm, nature, tag, memlimit_mb: int = 0, gzip_after: bool = False):
+    """Run program, write stdout+stderr to log_file_name.
+
+    If gzip_after=True and the log file is not already .gz, compress it with
+    gzip after a successful or failed run (so the plain file is removed).
+    """
+    import gzip as _gzip, shutil as _shutil
+
     print(f"[RUN] {program} {' '.join(args)}")
     print(f"[LOG] {log_file_name}")
     if memlimit_mb > 0:
         print(f"[MEM] Limit: {memlimit_mb} MB")
 
+    success = False
     try:
         with open(log_file_name, 'w') as log_file:
             preexec = make_memlimit_fn(memlimit_mb) if memlimit_mb > 0 else None
@@ -2996,7 +3009,7 @@ def run_and_log(program, args, log_file_name, algorithm, nature, tag, memlimit_m
 
             if result.returncode == 0:
                 print(f"[OK] Output saved to {log_file_name}")
-                return True
+                success = True
             elif result.returncode == -9:
                 print(f"[KILLED] Out of memory (limit: {memlimit_mb} MB). See {log_file_name}", file=sys.stderr)
             else:
@@ -3004,8 +3017,19 @@ def run_and_log(program, args, log_file_name, algorithm, nature, tag, memlimit_m
 
     except Exception as e:
         print(f"[ERROR] Execution failed: {e}", file=sys.stderr)
+        return False
 
-    return False
+    if gzip_after and not log_file_name.endswith('.gz') and os.path.exists(log_file_name):
+        gz_name = log_file_name + '.gz'
+        try:
+            with open(log_file_name, 'rb') as f_in, _gzip.open(gz_name, 'wb') as f_out:
+                _shutil.copyfileobj(f_in, f_out)
+            os.remove(log_file_name)
+            print(f"[GZ] Compressed to {gz_name}")
+        except Exception as e:
+            print(f"[WARN] gzip failed for {log_file_name}: {e}", file=sys.stderr)
+
+    return success
 
 if __name__ == "__main__":
     main()
