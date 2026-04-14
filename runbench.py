@@ -1087,7 +1087,7 @@ def parse_log_for_auto(log_file, library):
         with open(log_file, 'r') as f:
             lines = f.readlines()
     except (OSError, IOError):
-        return func_line_counts, leak_call_chains, {}
+        return func_line_counts, {}, leak_call_chains, {}
 
     # First pass: build addr_to_func mapping, func_line_counts, and transitions
     for line in lines:
