@@ -2438,12 +2438,15 @@ def auto_test(args):
             print(f"  + {os.path.relpath(sf, args.root)}")
 
         print(f"[CASE] auto iteration {iteration}")
-        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit, gzip_after=not args.end_report):
+        if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
             success = False
 
         stats, leaks_path, leak_sites, leak_times, new_files, func_to_file, func_counts, excluded = \
             _auto_iter_report(iteration, log_file, debug_binary, accumulated_stubs,
                               args, script_root, resolved_keylen, generate_leaks=True)
+
+        if not args.end_report:
+            gzip_log(log_file)
 
         iteration_stats.append(stats)
         if leaks_path and os.path.exists(leaks_path):
@@ -2501,7 +2504,7 @@ def auto_test(args):
             run_args = parts[1:]
 
             print(f"[CASE] auto allstubs")
-            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit, gzip_after=not args.end_report):
+            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
                 success = False
             n_alerts = count_leaks_in_log(log_file)
             leaks_path = log_file.replace('.log', '.leaks')
@@ -2515,6 +2518,8 @@ def auto_test(args):
             elif n_alerts > 0:
                 n_unique = len(get_unique_leak_addrs(log_file))
             hooked_bn = get_hooked_bn_functions(log_file, args.library)
+            if not args.end_report:
+                gzip_log(log_file)
             iteration_stats.append({
                 "iteration": "allstubs",
                 "phase": "allstubs",
@@ -2570,7 +2575,7 @@ def auto_test(args):
             run_args = parts[1:]
 
             print(f"[CASE] auto final")
-            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit, gzip_after=not args.end_report):
+            if not run_and_log(program, run_args, log_file, algorithm, nature, tag, args.memlimit):
                 success = False
             n_alerts = count_leaks_in_log(log_file)
             leaks_path = log_file.replace('.log', '.leaks')
@@ -2585,6 +2590,8 @@ def auto_test(args):
             elif n_alerts > 0:
                 n_unique = len(get_unique_leak_addrs(log_file))
             hooked_bn = get_hooked_bn_functions(log_file, args.library)
+            if not args.end_report:
+                gzip_log(log_file)
             iteration_stats.append({
                 "iteration": "final",
                 "phase": "final",
@@ -3030,6 +3037,21 @@ def run_and_log(program, args, log_file_name, algorithm, nature, tag, memlimit_m
             print(f"[WARN] gzip failed for {log_file_name}: {e}", file=sys.stderr)
 
     return success
+
+
+def gzip_log(log_file_name):
+    """Compress log_file_name to log_file_name.gz and remove the plain file."""
+    import gzip as _gzip, shutil as _shutil
+    if log_file_name.endswith('.gz') or not os.path.exists(log_file_name):
+        return
+    gz_name = log_file_name + '.gz'
+    try:
+        with open(log_file_name, 'rb') as f_in, _gzip.open(gz_name, 'wb') as f_out:
+            _shutil.copyfileobj(f_in, f_out)
+        os.remove(log_file_name)
+        print(f"[GZ] Compressed to {gz_name}")
+    except Exception as e:
+        print(f"[WARN] gzip failed for {log_file_name}: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
