@@ -2100,7 +2100,7 @@ def _auto_iter_report(iteration, log_file, binary_path, accumulated_stubs,
     total_lines = sum(func_counts.values())
     if total_lines == 0:
         print(f"  [AUTO] No traced lines found in log")
-        return stats, leaks_path, leak_sites, leak_times, set(), {}, func_counts
+        return stats, leaks_path, leak_sites, leak_times, set(), {}, func_counts, set()
 
     bn_lines = sum(c for f, c in func_counts.items() if is_bn_function(f, library))
     leak_bn_funcs = {f for chain in leak_call_chains for f in chain if is_bn_function(f, library)}
