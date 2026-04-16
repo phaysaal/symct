@@ -29,11 +29,14 @@ extern "C" {
 #undef  HAVE_THREAD_LS
 #define HAVE_THREAD_LS
 
-#undef  DEBUG_WOLFSSL
-#define DEBUG_WOLFSSL
-
 #undef  NO_DO178
 #define NO_DO178
+
+#undef  TFM_NO_ASM
+#define TFM_NO_ASM
+
+#undef  WOLFSSL_NO_ASM
+#define WOLFSSL_NO_ASM
 
 #undef  WOLFSSL_X86_64_BUILD
 #define WOLFSSL_X86_64_BUILD
@@ -110,6 +113,9 @@ extern "C" {
 #undef  HAVE_POLY1305
 #define HAVE_POLY1305
 
+#undef  NO_CHACHA_ASM
+#define NO_CHACHA_ASM
+
 #undef  HAVE_CHACHA
 #define HAVE_CHACHA
 
@@ -155,32 +161,83 @@ extern "C" {
 #undef  NO_MD4
 #define NO_MD4
 
-#undef  WOLFSSL_SP_MATH_ALL
-#define WOLFSSL_SP_MATH_ALL
-
-#undef  WOLFSSL_SP_X86_64
-#define WOLFSSL_SP_X86_64
-
 #undef  WC_NO_ASYNC_THREADING
 #define WC_NO_ASYNC_THREADING
 
 #undef  HAVE_DH_DEFAULT_PARAMS
 #define HAVE_DH_DEFAULT_PARAMS
 
+#undef  HAVE_OID_ENCODING
+#define HAVE_OID_ENCODING
+
+#undef  WOLFSSL_NO_ASN_STRICT
+#define WOLFSSL_NO_ASN_STRICT
+
+#undef  HAVE_ED25519
+#define HAVE_ED25519
+
 #undef  WOLFSSL_SYS_CA_CERTS
 #define WOLFSSL_SYS_CA_CERTS
+
+#undef  WOLFSSL_ALT_NAMES
+#define WOLFSSL_ALT_NAMES
 
 #undef  WOLFSSL_KEY_GEN
 #define WOLFSSL_KEY_GEN
 
-#undef  NO_MD5
-#define NO_MD5
+#undef  WOLFSSL_CERT_REQ
+#define WOLFSSL_CERT_REQ
 
-#undef  NO_OLD_TLS
-#define NO_OLD_TLS
+#undef  WOLFSSL_CERT_GEN
+#define WOLFSSL_CERT_GEN
 
-#undef  NO_DES3
-#define NO_DES3
+#undef  WOLFSSL_CERT_EXT
+#define WOLFSSL_CERT_EXT
+
+#undef  OPENSSL_ALL
+#define OPENSSL_ALL
+
+#undef  WOLFSSL_EITHER_SIDE
+#define WOLFSSL_EITHER_SIDE
+
+#undef  WC_RSA_NO_PADDING
+#define WC_RSA_NO_PADDING
+
+#undef  WC_RSA_PSS
+#define WC_RSA_PSS
+
+#undef  WOLFSSL_PSS_LONG_SALT
+#define WOLFSSL_PSS_LONG_SALT
+
+#undef  WOLFSSL_TICKET_HAVE_ID
+#define WOLFSSL_TICKET_HAVE_ID
+
+#undef  WOLFSSL_ERROR_CODE_OPENSSL
+#define WOLFSSL_ERROR_CODE_OPENSSL
+
+#undef  WOLFSSL_CERT_NAME_ALL
+#define WOLFSSL_CERT_NAME_ALL
+
+#undef  WOLFSSL_AES_COUNTER
+#define WOLFSSL_AES_COUNTER
+
+#undef  WOLFSSL_AES_DIRECT
+#define WOLFSSL_AES_DIRECT
+
+#undef  OPENSSL_EXTRA
+#define OPENSSL_EXTRA
+
+#undef  HAVE_PKCS7
+#define HAVE_PKCS7
+
+#undef  HAVE_AES_KEYWRAP
+#define HAVE_AES_KEYWRAP
+
+#undef  WOLFSSL_AES_DIRECT
+#define WOLFSSL_AES_DIRECT
+
+#undef  HAVE_X963_KDF
+#define HAVE_X963_KDF
 
 #undef  NO_DES3_TLS_SUITES
 #define NO_DES3_TLS_SUITES
